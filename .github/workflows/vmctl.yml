@@ -1,0 +1,19 @@
+name: vmctl
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'vmctl command to run (e.g. list, start MyVM, exec --folder MyFolder "hostname" --user USER --pass PASSWORD)'
+        required: true
+        type: string
+
+jobs:
+  run:
+    runs-on: self-hosted
+    env:
+      ENV_PATH: C:/actions-runner/.env
+      RUNNER_TRACKING_ID: ""
+    steps:
+      - name: Run vmctl
+        run: C:\actions-runner\vmctl.exe ${{ github.event.inputs.command }}

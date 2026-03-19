@@ -1,0 +1,4 @@
+.env
+.claude
+vmctl.exe
+build.ps1
