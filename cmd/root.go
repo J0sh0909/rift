@@ -624,7 +624,8 @@ var execCmd = &cobra.Command{
 				return result{vm.Name, ""}
 			}
 
-			return result{vm.Name, string(data)}		}
+			return result{vm.Name, string(data)}
+		}
 
 		if folderFlag == "" {
 			r := runOne(targets[0])
@@ -727,7 +728,7 @@ var snapshotCreateCmd = &cobra.Command{
 				}
 				internal.LogInfo(vm.Name, "resumed")
 			}
-			nextVM:
+		nextVM:
 		}
 	},
 }
@@ -997,7 +998,7 @@ var archiveExportCmd = &cobra.Command{
 					dir = filepath.Join(settings.ArchivePath, "OVA", label)
 				}
 				if err := os.MkdirAll(dir, 0755); err != nil {
-				internal.LogError(internal.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
+					internal.LogError(internal.ErrExportFailed, vm.Name, "failed to create export directory: %s", err)
 					return "", false
 				}
 				destPath = filepath.Join(dir, label+"-"+ts+".ova")
@@ -1066,7 +1067,7 @@ var archiveExportCmd = &cobra.Command{
 			}
 			wg.Wait()
 			p.Wait()
-						for _, r := range results {
+			for _, r := range results {
 				if r.err != nil {
 					internal.LogError(internal.ErrExportFailed, r.name, "%s", r.err)
 				} else {
