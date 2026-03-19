@@ -14,6 +14,7 @@ A cross-hypervisor VM orchestration CLI built in Go.
 - **Hardware configuration** — edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
 - **Structured error codes** — every failure prints a `[VMxxx]` code; `vmctl errors` lists all codes and descriptions
 - **GitHub Actions pipeline** — trigger any vmctl command against a self-hosted runner via `workflow_dispatch`
+- **Cross-platform host support** — compiles and runs on both Windows and Linux hosts; host resource detection, VMware process management, and ovftool lookup all adapt automatically to the host OS
 
 ---
 
@@ -29,7 +30,7 @@ A cross-hypervisor VM orchestration CLI built in Go.
 ## Prerequisites
 
 - Go 1.23+
-- VMware Workstation (with `vmrun.exe`, `vmware-vdiskmanager.exe`, `ovftool.exe`)
+- VMware Workstation with `vmrun`, `vmware-vdiskmanager`, and `ovftool` available (`.exe` on Windows, no extension on Linux)
 - Guest credentials for `exec` — use any existing account or provision a dedicated one with the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (recommended)
 
 ---
@@ -73,6 +74,7 @@ cd remote-vm-manipulation
 
 Create a `.env` file in the repo root (or at the path pointed to by `ENV_PATH`):
 
+**Windows**
 ```
 VMRUN_PATH=C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe
 VM_DIRECTORY=C:\Users\USER\Documents\Virtual Machines
@@ -86,11 +88,30 @@ VM_DEFAULT_PASS=PASSWORD
 HYPERVISOR=workstation
 ```
 
+**Linux**
+```
+VMRUN_PATH=/usr/bin/vmrun
+VM_DIRECTORY=/home/USER/vmware
+INVENTORY_PATH=/home/USER/.vmware/inventory.vmls
+NETMAP_PATH=/etc/vmware/netmap.conf
+ISO_DIRECTORY=/home/USER/iso
+VDISK_PATH=/usr/bin/vmware-vdiskmanager
+ARCHIVE_PATH=/home/USER/vm-storage
+VM_DEFAULT_USER=runner
+VM_DEFAULT_PASS=PASSWORD
+HYPERVISOR=workstation
+```
+
 Build:
 
 ```
+# Windows
 go build -o vmctl.exe .
-# or install to $GOPATH/bin:
+
+# Linux
+go build -o vmctl .
+
+# or install to $GOPATH/bin on either platform:
 go install .
 ```
 
