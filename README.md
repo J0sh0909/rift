@@ -30,7 +30,37 @@ A cross-hypervisor VM orchestration CLI built in Go.
 
 - Go 1.23+
 - VMware Workstation (with `vmrun.exe`, `vmware-vdiskmanager.exe`, `ovftool.exe`)
-- Guest credentials bootstrapped via the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (`VM_DEFAULT_USER` / `VM_DEFAULT_PASS`)
+- Guest credentials for `exec` — use any existing account or provision a dedicated one with the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (recommended)
+
+---
+
+## Guest Credentials
+
+The `exec` command requires guest OS credentials to run commands inside VMs. You can pass them explicitly on every call with `--user` and `--pass`, or set defaults in `.env` with `VM_DEFAULT_USER` and `VM_DEFAULT_PASS` so you never have to type them again.
+
+**Provisioning a dedicated automation user (recommended)**
+
+Use the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) companion script to create a `runner` account purpose-built for automation. The script must be executed with administrator privileges **directly inside each guest VM** — as `root` on Linux or in an elevated PowerShell session on Windows. It creates a `runner` user with a password you define and grants it escalated privileges (`sudo` on Linux, local administrator on Windows).
+
+Once provisioned, add the following to your `.env` and all `exec` commands work without flags:
+
+```
+VM_DEFAULT_USER=runner
+VM_DEFAULT_PASS=<password chosen during bootstrap>
+```
+
+**Usage patterns**
+
+```
+# Explicit flags — works with any existing account, no .env required
+vmctl exec MyVM "hostname" --user USER --pass PASSWORD
+
+# .env defaults — after bootstrap, no flags needed
+vmctl exec MyVM "hostname"
+
+# Folder-wide with .env defaults
+vmctl exec --folder MyFolder "hostname"
+```
 
 ---
 
