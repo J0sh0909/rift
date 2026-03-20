@@ -672,37 +672,122 @@ var execCmd = &cobra.Command{
 // bootstrap helpers
 // ---------------------------------------------------------------------------
 
-// bootstrapRunOne executes a bootstrap script operation on a single VM.
-// winURL is the URL to download the Windows script from.
-// winTempFile is the guest-side destination path for the downloaded script.
-// winPSArgs is the full PowerShell argument passed after -ExecutionPolicy Bypass
-// (e.g. "-File C:\...\script.ps1 -Username foo" or "-Command \"...\"").
-// linuxInner is the command string passed inside sudo -S bash -c '...'.
-// successMsg is printed on success.
-func bootstrapRunOne(vm internal.VM, user, pass, winURL, winTempFile, winPSArgs, linuxInner, successMsg string) powerResult {
-	if !vm.Running {
-		return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
-	}
-	guestOS := internal.GetGuestOS(vm.Path)
-	if guestOS == "" {
-		return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
-	}
-	if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
-		if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`,
-			`/c curl.exe -sL `+winURL+` -o `+winTempFile); err != nil {
-			return powerResult{vm.Name, internal.ErrBootstrapWindows, "script download failed: " + err.Error()}
-		}
-		if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`,
-			`/c powershell -ExecutionPolicy Bypass `+winPSArgs); err != nil {
-			return powerResult{vm.Name, internal.ErrBootstrapWindows, "script execution failed: " + err.Error()}
-		}
-	} else {
-		if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
-			`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`); err != nil {
-			return powerResult{vm.Name, internal.ErrBootstrapLinux, "failed: " + err.Error()}
-		}
+// winCmd runs a single cmd.exe /c command in a Windows guest and returns any error.
+func winCmd(vm internal.VM, user, pass, arg string) error {
+	_, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+arg)
+	return err
+}
+
+// bootstrapRunLinux executes an inline bash command on a Linux guest via sudo.
+// The caller is responsible for checking vm.Running and guestOS before calling.
+// linuxInner is the command string run inside sudo -S bash -c '...'.
+func bootstrapRunLinux(vm internal.VM, user, pass, linuxInner, successMsg string) powerResult {
+	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
+		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`); err != nil {
+		return powerResult{vm.Name, internal.ErrBootstrapLinux, "failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", successMsg}
+}
+
+// bootstrapWindowsCreate provisions the runner user on a Windows guest using
+// pure cmd.exe commands — no PowerShell or script download required.
+func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResult {
+	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp+` /add /fullname:"Automation Runner" /comment:"VM automation user"`); err != nil {
+		return powerResult{vm.Name, internal.ErrBootstrapWindows, "create user failed: " + err.Error()}
+	}
+	// Add to local Administrators group; fall back to French locale name if needed.
+	if err := winCmd(vm, user, pass, `net localgroup Administrators `+ru+` /add`); err != nil {
+		if err2 := winCmd(vm, user, pass, `net localgroup Administrateurs `+ru+` /add`); err2 != nil {
+			return powerResult{vm.Name, internal.ErrBootstrapWindows, "add to admin group failed: " + err.Error()}
+		}
+	}
+	if err := winCmd(vm, user, pass, `reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 0 /f`); err != nil {
+		return powerResult{vm.Name, internal.ErrBootstrapWindows, "disable UAC failed: " + err.Error()}
+	}
+	if err := winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' set PasswordExpires=FALSE`); err != nil {
+		return powerResult{vm.Name, internal.ErrBootstrapWindows, "disable password expiry failed: " + err.Error()}
+	}
+	return powerResult{vm.Name, "", "bootstrap complete"}
+}
+
+// bootstrapWindowsVerify checks that the runner user is correctly provisioned
+// on a Windows guest using pure cmd.exe commands. Each check is printed inline
+// as [OK] or [FAIL]. Returns success only if all checks pass.
+func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
+	allOK := true
+
+	// Check 1: user exists
+	if winCmd(vm, user, pass, `net user `+ru) == nil {
+		fmt.Printf("[%s]   [OK]   user '%s' exists\n", vm.Name, ru)
+	} else {
+		fmt.Printf("[%s]   [FAIL] user '%s' does not exist\n", vm.Name, ru)
+		allOK = false
+	}
+
+	// Check 2: user is in the local Administrators group.
+	// "net user <name>" lists group memberships; pipe through findstr to check.
+	// Search for "Administ" — common prefix across Administrators/Administrateurs/Administratoren/Administradores.
+	// Fallback: list the group directly by English or French name.
+	inAdmin := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Administ`) == nil
+	if !inAdmin {
+		inAdmin = winCmd(vm, user, pass, `net localgroup Administrators | findstr /I `+ru) == nil
+	}
+	if !inAdmin {
+		inAdmin = winCmd(vm, user, pass, `net localgroup Administrateurs | findstr /I `+ru) == nil
+	}
+	if inAdmin {
+		fmt.Printf("[%s]   [OK]   user '%s' is in Administrators\n", vm.Name, ru)
+	} else {
+		fmt.Printf("[%s]   [FAIL] user '%s' is not in Administrators\n", vm.Name, ru)
+		allOK = false
+	}
+
+	// Check 3: UAC disabled (EnableLUA = 0x0).
+	if winCmd(vm, user, pass, `reg query HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA | findstr 0x0`) == nil {
+		fmt.Printf("[%s]   [OK]   UAC is disabled\n", vm.Name)
+	} else {
+		fmt.Printf("[%s]   [FAIL] UAC is not disabled\n", vm.Name)
+		allOK = false
+	}
+
+	// Check 4: password expiry disabled.
+	if winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' get PasswordExpires | findstr /I FALSE`) == nil {
+		fmt.Printf("[%s]   [OK]   password expiry disabled\n", vm.Name)
+	} else {
+		fmt.Printf("[%s]   [FAIL] password expiry is not disabled\n", vm.Name)
+		allOK = false
+	}
+
+	if !allOK {
+		return powerResult{vm.Name, internal.ErrBootstrapWindows, "verify failed"}
+	}
+	return powerResult{vm.Name, "", "verify passed"}
+}
+
+// bootstrapWindowsReset sets a new password for the runner user on a Windows guest.
+func bootstrapWindowsReset(vm internal.VM, user, pass, ru, rp string) powerResult {
+	if err := winCmd(vm, user, pass, `net user `+ru+` `+rp); err != nil {
+		return powerResult{vm.Name, internal.ErrBootstrapWindows, "password reset failed: " + err.Error()}
+	}
+	return powerResult{vm.Name, "", "password reset complete"}
+}
+
+// bootstrapWindowsRevoke removes the runner user from a Windows guest.
+func bootstrapWindowsRevoke(vm internal.VM, user, pass, ru string) powerResult {
+	if err := winCmd(vm, user, pass, `net user `+ru+` /delete`); err != nil {
+		return powerResult{vm.Name, internal.ErrBootstrapWindows, "revoke failed: " + err.Error()}
+	}
+	return powerResult{vm.Name, "", "revoke complete"}
+}
+
+// bootstrapAdminAuth resolves guest credentials from flags only — no .env fallback.
+// Use this for operations that must run as an admin (verify, revoke).
+func bootstrapAdminAuth(userFlag, passFlag string) (user, pass string, ok bool) {
+	if userFlag == "" || passFlag == "" {
+		fmt.Fprintln(os.Stderr, "error: --user and --pass are required (admin credentials needed)")
+		return "", "", false
+	}
+	return userFlag, passFlag, true
 }
 
 // bootstrapAuth resolves guest credentials from flags then .env defaults.
@@ -776,10 +861,17 @@ var bootstrapCreateCmd = &cobra.Command{
 		rp := bootstrapRunnerPassFlag
 		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
 		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
-			return bootstrapRunOne(vm, user, pass,
-				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/bootstrap/bootstrap-windows.ps1",
-				`C:\Windows\Temp\bootstrap.ps1`,
-				`-File C:\Windows\Temp\bootstrap.ps1 -Username `+ru+` -Password `+rp,
+			if !vm.Running {
+				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+			}
+			guestOS := internal.GetGuestOS(vm.Path)
+			if guestOS == "" {
+				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+			}
+			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+				return bootstrapWindowsCreate(vm, user, pass, ru, rp)
+			}
+			return bootstrapRunLinux(vm, user, pass,
 				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/bootstrap/bootstrap-linux.sh -o /tmp/bootstrap.sh && chmod +x /tmp/bootstrap.sh && /tmp/bootstrap.sh `+ru+` "$RUNNER_PASS"`,
 				"bootstrap complete",
 			)
@@ -794,19 +886,44 @@ var bootstrapVerifyCmd = &cobra.Command{
 		requireSettings()
 		targets, err := internal.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
-		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
 		ru := bootstrapEffectiveRunnerUser()
 		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
-			return bootstrapRunOne(vm, user, pass,
-				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-windows.ps1",
-				`C:\Windows\Temp\verify.ps1`,
-				`-File C:\Windows\Temp\verify.ps1 -Username `+ru,
-				`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-linux.sh -o /tmp/verify.sh && chmod +x /tmp/verify.sh && /tmp/verify.sh `+ru,
-				"verify passed",
-			)
+			if !vm.Running {
+				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+			}
+			guestOS := internal.GetGuestOS(vm.Path)
+			if guestOS == "" {
+				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+			}
+			isWin := strings.HasPrefix(strings.ToLower(guestOS), "windows")
+			var r powerResult
+			if isWin {
+				r = bootstrapWindowsVerify(vm, user, pass, ru)
+			} else {
+				r = bootstrapRunLinux(vm, user, pass,
+					`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-linux.sh -o /tmp/verify.sh && chmod +x /tmp/verify.sh && /tmp/verify.sh `+ru,
+					"verify passed",
+				)
+			}
+			if r.code != "" {
+				return r
+			}
+			runnerUser := settings.DefaultUser
+			runnerPass := settings.DefaultPass
+			var authErr error
+			if isWin {
+				_, authErr = hv.RunGuestProgram(vm.Path, runnerUser, runnerPass, `C:\Windows\System32\cmd.exe`, `/c whoami`)
+			} else {
+				_, authErr = hv.RunGuestCommand(vm.Path, runnerUser, runnerPass, "/bin/bash", "whoami")
+			}
+			if authErr == nil {
+				return powerResult{vm.Name, "", "verify passed (runner auth OK)"}
+			}
+			return powerResult{vm.Name, "", "verify passed (runner auth failed — check password)"}
 		})
 	},
 }
@@ -830,10 +947,17 @@ var bootstrapResetCmd = &cobra.Command{
 		rp := bootstrapRunnerPassFlag
 		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
 		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
-			return bootstrapRunOne(vm, user, pass,
-				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/reset-password/reset-windows.ps1",
-				`C:\Windows\Temp\reset-password.ps1`,
-				`-File C:\Windows\Temp\reset-password.ps1 -Username `+ru+` -NewPassword `+rp,
+			if !vm.Running {
+				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+			}
+			guestOS := internal.GetGuestOS(vm.Path)
+			if guestOS == "" {
+				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+			}
+			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+				return bootstrapWindowsReset(vm, user, pass, ru, rp)
+			}
+			return bootstrapRunLinux(vm, user, pass,
 				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/reset-password/reset-linux.sh -o /tmp/reset-password.sh && chmod +x /tmp/reset-password.sh && /tmp/reset-password.sh `+ru+` "$RUNNER_PASS"`,
 				"password reset complete",
 			)
@@ -848,16 +972,23 @@ var bootstrapRevokeCmd = &cobra.Command{
 		requireSettings()
 		targets, err := internal.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
-		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
 		ru := bootstrapEffectiveRunnerUser()
 		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
-			return bootstrapRunOne(vm, user, pass,
-				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/revoke/revoke-windows.ps1",
-				`C:\Windows\Temp\revoke.ps1`,
-				`-File C:\Windows\Temp\revoke.ps1 -Username `+ru,
+			if !vm.Running {
+				return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+			}
+			guestOS := internal.GetGuestOS(vm.Path)
+			if guestOS == "" {
+				return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+			}
+			if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+				return bootstrapWindowsRevoke(vm, user, pass, ru)
+			}
+			return bootstrapRunLinux(vm, user, pass,
 				`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/revoke/revoke-linux.sh -o /tmp/revoke.sh && chmod +x /tmp/revoke.sh && /tmp/revoke.sh `+ru,
 				"revoke complete",
 			)
