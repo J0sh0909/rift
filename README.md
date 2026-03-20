@@ -1,4 +1,4 @@
-# vmctl
+# rift
 
 A cross-hypervisor VM orchestration CLI built in Go.
 
@@ -12,8 +12,8 @@ A cross-hypervisor VM orchestration CLI built in Go.
 - **Snapshot management** -create (with duplicate detection), list, revert, and delete snapshots; running VMs are suspended automatically before capture
 - **OVF/OVA archive pipeline** -export and import VMs via `ovftool` with per-VM mpb progress bars; versioned directory layout under `ARCHIVE_PATH`
 - **Hardware configuration** -edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
-- **Structured error codes** -every failure prints a `[VMxxx]` code; `vmctl errors` lists all codes and descriptions
-- **GitHub Actions pipeline** -trigger any vmctl command against a self-hosted runner via `workflow_dispatch`
+- **Structured error codes** -every failure prints a `[VMxxx]` code; `rift errors` lists all codes and descriptions
+- **GitHub Actions pipeline** -trigger any rift command against a self-hosted runner via `workflow_dispatch`
 - **Cross-platform host support** -compiles and runs on both Windows and Linux hosts; host resource detection, VMware process management, and ovftool lookup all adapt automatically to the host OS
 
 ---
@@ -54,13 +54,13 @@ VM_DEFAULT_PASS=<password chosen during bootstrap>
 
 ```
 # Explicit flags -works with any existing account, no .env required
-vmctl exec MyVM "hostname" --user USER --pass PASSWORD
+rift exec MyVM "hostname" --user USER --pass PASSWORD
 
 # .env defaults -after bootstrap, no flags needed
-vmctl exec MyVM "hostname"
+rift exec MyVM "hostname"
 
 # Folder-wide with .env defaults
-vmctl exec --folder MyFolder "hostname"
+rift exec --folder MyFolder "hostname"
 ```
 
 ---
@@ -106,10 +106,10 @@ Build:
 
 ```
 # Windows
-go build -o vmctl.exe .
+go build -o rift.exe .
 
 # Linux
-go build -o vmctl .
+go build -o rift .
 
 # or install to $GOPATH/bin on either platform:
 go install .
@@ -123,74 +123,74 @@ go install .
 
 ```
 # List all VMs grouped by folder
-vmctl list
+rift list
 
 # Power operations
-vmctl start MyVM
-vmctl stop MyVM --hard
-vmctl suspend --folder MyFolder
-vmctl reset MyVM1 MyVM2
+rift start MyVM
+rift stop MyVM --hard
+rift suspend --folder MyFolder
+rift reset MyVM1 MyVM2
 
 # VM info
-vmctl info MyVM --specs --net --disk
+rift info MyVM --specs --net --disk
 
 # Run a command inside a guest
-vmctl exec MyVM "whoami" --user USER --pass PASSWORD
-vmctl exec --folder MyFolder "hostname" --user USER --pass PASSWORD
+rift exec MyVM "whoami" --user USER --pass PASSWORD
+rift exec --folder MyFolder "hostname" --user USER --pass PASSWORD
 
 # Snapshots
-vmctl snapshot create MyVM --name pre-upgrade
-vmctl snapshot create --folder MyFolder --name pre-upgrade
-vmctl snapshot list MyVM
-vmctl snapshot revert MyVM pre-upgrade
-vmctl snapshot revert --folder MyFolder --origin -y
-vmctl snapshot delete MyVM pre-upgrade
-vmctl snapshot delete --folder MyFolder --current -y
+rift snapshot create MyVM --name pre-upgrade
+rift snapshot create --folder MyFolder --name pre-upgrade
+rift snapshot list MyVM
+rift snapshot revert MyVM pre-upgrade
+rift snapshot revert --folder MyFolder --origin -y
+rift snapshot delete MyVM pre-upgrade
+rift snapshot delete --folder MyFolder --current -y
 
 # OVF/OVA archives
-vmctl archive export MyVM --format ova
-vmctl archive export --folder MyFolder --format ovf --name backup
-vmctl archive list
-vmctl archive import MyVM-20260101-120000
-vmctl archive import MyVM --latest --format ova
-vmctl archive delete MyVM --oldest -y
+rift archive export MyVM --format ova
+rift archive export --folder MyFolder --format ovf --name backup
+rift archive list
+rift archive import MyVM-20260101-120000
+rift archive import MyVM --latest --format ova
+rift archive delete MyVM --oldest -y
 
 # Hardware config
-vmctl config cpu MyVM --sockets 1 --cores 4
-vmctl config ram MyVM --size 8
-vmctl config nic MyVM --add --type bridged
-vmctl config nic MyVM --regen-mac --index 0
-vmctl config disk add MyVM --size 50 --controller scsi0
-vmctl config disk expand MyVM --controller scsi0 --slot 1 --size 100
-vmctl config display MyVM --accel3d on --gfxmem 512
-vmctl config os MyVM --set ubuntu-64
+rift config cpu MyVM --sockets 1 --cores 4
+rift config ram MyVM --size 8
+rift config nic MyVM --add --type bridged
+rift config nic MyVM --regen-mac --index 0
+rift config disk add MyVM --size 50 --controller scsi0
+rift config disk expand MyVM --controller scsi0 --slot 1 --size 100
+rift config display MyVM --accel3d on --gfxmem 512
+rift config os MyVM --set ubuntu-64
 
 # Networking
-vmctl networks
+rift networks
 
 # ISO management
-vmctl isos
-vmctl config cdrom mount MyVM --iso ubuntu.iso --controller sata0
-vmctl config cdrom unmount MyVM --controller sata0
+rift isos
+rift config cdrom mount MyVM --iso ubuntu.iso --controller sata0
+rift config cdrom unmount MyVM --controller sata0
 
 # Error code reference
-vmctl errors
+rift errors
 ```
 
 ### Running via GitHub Actions
 
-When using the pipeline, enter only the command and its arguments in the workflow input -not the `vmctl` prefix. The workflow prepends the binary path automatically.
+When using the pipeline, enter only the command and its arguments in the workflow input -not the `rift` prefix. The workflow prepends the binary path automatically.
 
 | Context | What you type |
 |---|---|
-| Local | `vmctl start MyVM` |
+| Local | `rift start MyVM` |
 | Workflow input | `start MyVM` |
 
 ```
 # Local
-vmctl exec --folder MyFolder "hostname" --user USER --pass PASSWORD
+rift exec --folder MyFolder "hostname" --user USER --pass PASSWORD
 
-# Workflow input field (Actions -> vmctl -> Run workflow)
+# Workflow input field (Actions -> rift -> Run workflow)
 exec --folder MyFolder "hostname" --user USER --pass PASSWORD
 ```
 
@@ -198,7 +198,7 @@ exec --folder MyFolder "hostname" --user USER --pass PASSWORD
 
 ## Architecture
 
-vmctl is built around a `Hypervisor` interface (`internal/hypervisor.go`) that abstracts all backend operations. Each hypervisor backend (e.g., `internal/workstation.go`) implements this interface independently, so commands in `cmd/root.go` are fully backend-agnostic.
+rift is built around a `Hypervisor` interface (`internal/hypervisor.go`) that abstracts all backend operations. Each hypervisor backend (e.g., `internal/workstation.go`) implements this interface independently, so commands in `cmd/root.go` are fully backend-agnostic.
 
 VM inventory and power state are resolved through `internal.ResolveTargets` / `internal.ResolveAllVMs`, which query the backend and filter by folder or explicit name list. Parallel execution (folder mode) is handled at the command layer using goroutines with a shared mutex for result collection.
 
@@ -208,11 +208,11 @@ Adding a new hypervisor backend requires implementing the `Hypervisor` interface
 
 ## Pipeline
 
-vmctl ships a `workflow_dispatch` GitHub Actions workflow (`.github/workflows/vmctl.yml`) that runs on a self-hosted Windows runner co-located with the VMware Workstation host.
+rift ships a `workflow_dispatch` GitHub Actions workflow (`.github/workflows/rift.yml`) that runs on a self-hosted Windows runner co-located with the VMware Workstation host.
 
-The workflow has no checkout or build steps -it executes a pre-built `C:\actions-runner\vmctl.exe` directly, making dispatch-to-execution near-instant. The `.env` file lives at `C:\actions-runner\.env` on the runner machine and is never committed to the repository.
+The workflow has no checkout or build steps -it executes a pre-built `C:\actions-runner\rift.exe` directly, making dispatch-to-execution near-instant. The `.env` file lives at `C:\actions-runner\.env` on the runner machine and is never committed to the repository.
 
-To use: go to **Actions -> vmctl -> Run workflow**, enter a vmctl command (e.g. `start MyVM`), and click **Run**.
+To use: go to **Actions -> rift -> Run workflow**, enter a rift command (e.g. `start MyVM`), and click **Run**.
 
 ---
 

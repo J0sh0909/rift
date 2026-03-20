@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/J0sh0909/remote-vm-manipulation/internal"
+	"github.com/J0sh0909/rift/internal"
 	"github.com/spf13/cobra"
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
@@ -152,7 +152,7 @@ func runPowerParallel(targets []internal.VM, action func(internal.VM) powerResul
 // ---------------------------------------------------------------------------
 
 var rootCmd = &cobra.Command{
-	Use:   "vmctl",
+	Use:   "rift",
 	Short: "VMware Workstation VM manager",
 }
 
@@ -549,7 +549,7 @@ var execCmd = &cobra.Command{
 				interpreter, ok = internal.DefaultInterpreter(guestOS)
 				if !ok {
 					if guestOS == "" {
-						internal.LogError(internal.ErrGuestOSNotDet, vm.Name, "guest OS not set — use \"vmctl config os %s --set <guestOS>\" or specify --interpreter manually", vm.Name)
+						internal.LogError(internal.ErrGuestOSNotDet, vm.Name, "guest OS not set — use \"rift config os %s --set <guestOS>\" or specify --interpreter manually", vm.Name)
 						return result{vm.Name, ""}
 					}
 					internal.LogError(internal.ErrGuestOSNotDet, vm.Name, "unknown guest OS %q — specify --interpreter manually", guestOS)
@@ -561,13 +561,13 @@ var execCmd = &cobra.Command{
 				(guestOS == "" && (strings.Contains(interpreter, `C:\`) || strings.Contains(interpreter, `\`)))
 
 			if isWindows {
-				guestOutputPath := `C:\Windows\Temp\vmctl-exec-output.txt`
-				if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\vmctl-exec-output.txt`); err != nil {
+				guestOutputPath := `C:\Windows\Temp\rift-exec-output.txt`
+				if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
 					internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
-				tmpFile, err := os.CreateTemp("", "vmctl-exec-*")
+				tmpFile, err := os.CreateTemp("", "rift-exec-*")
 				if err != nil {
 					_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
@@ -593,14 +593,14 @@ var execCmd = &cobra.Command{
 				return result{vm.Name, string(data)}
 			}
 			// Linux/non-Windows: temp file redirect
-			guestOutputPath := "/tmp/vmctl-exec-output.txt"
-			wrappedScript := script + " > /tmp/vmctl-exec-output.txt 2>&1"
+			guestOutputPath := "/tmp/rift-exec-output.txt"
+			wrappedScript := script + " > /tmp/rift-exec-output.txt 2>&1"
 			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript); err != nil {
 				internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
-			tmpFile, err := os.CreateTemp("", "vmctl-exec-*")
+			tmpFile, err := os.CreateTemp("", "rift-exec-*")
 			if err != nil {
 				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
@@ -1593,7 +1593,7 @@ var configOsCmd = &cobra.Command{
 			} else {
 				guestOS := internal.GetGuestOS(vm.Path)
 				if guestOS == "" {
-					fmt.Printf("%s → guestOS: (not set) — use \"vmctl config os %s --set <guestOS>\" to set it\n", vm.Name, vm.Name)
+					fmt.Printf("%s → guestOS: (not set) — use \"rift config os %s --set <guestOS>\" to set it\n", vm.Name, vm.Name)
 				} else {
 					fmt.Printf("%s → guestOS: %s\n", vm.Name, guestOS)
 				}
