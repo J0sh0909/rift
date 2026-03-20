@@ -1,4 +1,4 @@
-module github.com/J0sh0909/remote-vm-manipulation
+module github.com/J0sh0909/rift
 
 go 1.25.0
 
