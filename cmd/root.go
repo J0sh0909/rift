@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,6 +61,10 @@ var (
 	execPassFlag        string
 	execInterpreterFlag string
 	osSetFlag           string
+	bootstrapUserFlag      string
+	bootstrapPassFlag      string
+	bootstrapRunnerUserFlag string
+	bootstrapRunnerPassFlag string
 )
 
 // ---------------------------------------------------------------------------
@@ -660,6 +665,203 @@ var execCmd = &cobra.Command{
 				fmt.Printf("%s\n%s", r.name, r.output)
 			}
 		}
+	},
+}
+
+// ---------------------------------------------------------------------------
+// bootstrap helpers
+// ---------------------------------------------------------------------------
+
+// bootstrapRunOne executes a bootstrap script operation on a single VM.
+// winURL is the URL to download the Windows script from.
+// winTempFile is the guest-side destination path for the downloaded script.
+// winPSArgs is the full PowerShell argument passed after -ExecutionPolicy Bypass
+// (e.g. "-File C:\...\script.ps1 -Username foo" or "-Command \"...\"").
+// linuxInner is the command string passed inside sudo -S bash -c '...'.
+// successMsg is printed on success.
+func bootstrapRunOne(vm internal.VM, user, pass, winURL, winTempFile, winPSArgs, linuxInner, successMsg string) powerResult {
+	if !vm.Running {
+		return powerResult{vm.Name, internal.ErrNotRunning, "not running"}
+	}
+	guestOS := internal.GetGuestOS(vm.Path)
+	if guestOS == "" {
+		return powerResult{vm.Name, internal.ErrGuestOSNotDet, `guest OS not set — use "rift config os <name> --set <guestOS>"`}
+	}
+	if strings.HasPrefix(strings.ToLower(guestOS), "windows") {
+		if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`,
+			`/c curl.exe -sL `+winURL+` -o `+winTempFile); err != nil {
+			return powerResult{vm.Name, internal.ErrBootstrapWindows, "script download failed: " + err.Error()}
+		}
+		if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`,
+			`/c powershell -ExecutionPolicy Bypass `+winPSArgs); err != nil {
+			return powerResult{vm.Name, internal.ErrBootstrapWindows, "script execution failed: " + err.Error()}
+		}
+	} else {
+		if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
+			`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`); err != nil {
+			return powerResult{vm.Name, internal.ErrBootstrapLinux, "failed: " + err.Error()}
+		}
+	}
+	return powerResult{vm.Name, "", successMsg}
+}
+
+// bootstrapAuth resolves guest credentials from flags then .env defaults.
+// requireSettings() must be called before this.
+func bootstrapAuth(userFlag, passFlag string) (user, pass string, ok bool) {
+	user = userFlag
+	pass = passFlag
+	if user == "" {
+		user = settings.DefaultUser
+	}
+	if pass == "" {
+		pass = settings.DefaultPass
+	}
+	if user == "" || pass == "" {
+		fmt.Fprintln(os.Stderr, "guest credentials required: use --user/--pass or set VM_DEFAULT_USER/VM_DEFAULT_PASS in .env")
+		return "", "", false
+	}
+	return user, pass, true
+}
+
+// bootstrapEffectiveRunnerUser returns the runner username, defaulting to "runner".
+func bootstrapEffectiveRunnerUser() string {
+	if bootstrapRunnerUserFlag != "" {
+		return bootstrapRunnerUserFlag
+	}
+	return "runner"
+}
+
+// bootstrapDispatch runs action for a single VM (inline) or all targets in parallel (folder mode).
+func bootstrapDispatch(targets []internal.VM, action func(internal.VM) powerResult) {
+	if folderFlag == "" {
+		r := action(targets[0])
+		if r.code != "" {
+			internal.LogError(r.code, r.name, "%s", r.msg)
+		} else {
+			internal.LogInfo(r.name, r.msg)
+		}
+		return
+	}
+	runPowerParallel(targets, action)
+}
+
+// ---------------------------------------------------------------------------
+// bootstrap
+// ---------------------------------------------------------------------------
+
+var bootstrapCmd = &cobra.Command{
+	Use:   "bootstrap <target>",
+	Short: "Provision and manage the automation user on guest VMs",
+	Run: func(cmd *cobra.Command, args []string) {
+		bootstrapCreateCmd.Run(cmd, args)
+	},
+}
+
+var bootstrapCreateCmd = &cobra.Command{
+	Use:   "create <target>",
+	Short: "Provision the automation user on a guest VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		if bootstrapRunnerPassFlag == "" {
+			fmt.Fprintln(os.Stderr, "error: --runner-pass is required")
+			return
+		}
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		if !ok {
+			return
+		}
+		ru := bootstrapEffectiveRunnerUser()
+		rp := bootstrapRunnerPassFlag
+		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
+		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+			return bootstrapRunOne(vm, user, pass,
+				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/bootstrap/bootstrap-windows.ps1",
+				`C:\Windows\Temp\bootstrap.ps1`,
+				`-File C:\Windows\Temp\bootstrap.ps1 -Username `+ru+` -Password `+rp,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/bootstrap/bootstrap-linux.sh -o /tmp/bootstrap.sh && chmod +x /tmp/bootstrap.sh && /tmp/bootstrap.sh `+ru+` "$RUNNER_PASS"`,
+				"bootstrap complete",
+			)
+		})
+	},
+}
+
+var bootstrapVerifyCmd = &cobra.Command{
+	Use:   "verify <target>",
+	Short: "Verify the automation user is correctly provisioned on a guest VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		if !ok {
+			return
+		}
+		ru := bootstrapEffectiveRunnerUser()
+		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+			return bootstrapRunOne(vm, user, pass,
+				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-windows.ps1",
+				`C:\Windows\Temp\verify.ps1`,
+				`-File C:\Windows\Temp\verify.ps1 -Username `+ru,
+				`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-linux.sh -o /tmp/verify.sh && chmod +x /tmp/verify.sh && /tmp/verify.sh `+ru,
+				"verify passed",
+			)
+		})
+	},
+}
+
+var bootstrapResetCmd = &cobra.Command{
+	Use:   "reset <target>",
+	Short: "Reset the automation user password on a guest VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		if bootstrapRunnerPassFlag == "" {
+			fmt.Fprintln(os.Stderr, "error: --runner-pass is required")
+			return
+		}
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		if !ok {
+			return
+		}
+		ru := bootstrapEffectiveRunnerUser()
+		rp := bootstrapRunnerPassFlag
+		b64rp := base64.StdEncoding.EncodeToString([]byte(rp))
+		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+			return bootstrapRunOne(vm, user, pass,
+				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/reset-password/reset-windows.ps1",
+				`C:\Windows\Temp\reset-password.ps1`,
+				`-File C:\Windows\Temp\reset-password.ps1 -Username `+ru+` -NewPassword `+rp,
+				`RUNNER_PASS=$(echo `+b64rp+` | base64 -d) && curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/reset-password/reset-linux.sh -o /tmp/reset-password.sh && chmod +x /tmp/reset-password.sh && /tmp/reset-password.sh `+ru+` "$RUNNER_PASS"`,
+				"password reset complete",
+			)
+		})
+	},
+}
+
+var bootstrapRevokeCmd = &cobra.Command{
+	Use:   "revoke <target>",
+	Short: "Remove the automation user from a guest VM",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+		user, pass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
+		if !ok {
+			return
+		}
+		ru := bootstrapEffectiveRunnerUser()
+		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
+			return bootstrapRunOne(vm, user, pass,
+				"https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/revoke/revoke-windows.ps1",
+				`C:\Windows\Temp\revoke.ps1`,
+				`-File C:\Windows\Temp\revoke.ps1 -Username `+ru,
+				`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/revoke/revoke-linux.sh -o /tmp/revoke.sh && chmod +x /tmp/revoke.sh && /tmp/revoke.sh `+ru,
+				"revoke complete",
+			)
+		})
 	},
 }
 
@@ -2045,6 +2247,11 @@ func init() {
 	rootCmd.AddCommand(suspendCmd)
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(execCmd)
+	rootCmd.AddCommand(bootstrapCmd)
+	bootstrapCmd.AddCommand(bootstrapCreateCmd)
+	bootstrapCmd.AddCommand(bootstrapVerifyCmd)
+	bootstrapCmd.AddCommand(bootstrapResetCmd)
+	bootstrapCmd.AddCommand(bootstrapRevokeCmd)
 	rootCmd.AddCommand(networksCmd)
 	rootCmd.AddCommand(isosCmd)
 	rootCmd.AddCommand(configCmd)
@@ -2091,6 +2298,7 @@ func init() {
 	// Folder flag on all commands that support it
 	for _, cmd := range []*cobra.Command{
 		startCmd, stopCmd, suspendCmd, resetCmd, execCmd, infoCmd,
+		bootstrapCmd, bootstrapCreateCmd, bootstrapVerifyCmd, bootstrapResetCmd, bootstrapRevokeCmd,
 		configCpuCmd, configRamCmd, configNicCmd, configDisplayCmd, configOsCmd,
 		configDiskAddCmd, configDiskRemoveCmd, configDiskExpandCmd,
 		configDiskDefragCmd, configDiskCompactCmd,
@@ -2194,4 +2402,13 @@ func init() {
 	execCmd.Flags().StringVarP(&execUserFlag, "user", "u", "", "Guest OS username (required)")
 	execCmd.Flags().StringVarP(&execPassFlag, "pass", "p", "", "Guest OS password (required)")
 	execCmd.Flags().StringVarP(&execInterpreterFlag, "interpreter", "i", "", "Script interpreter (e.g. /bin/bash, C:\\Windows\\System32\\cmd.exe; default: auto-detect)")
+
+	// Bootstrap — persistent flags shared by all subcommands
+	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapUserFlag, "user", "u", "", "Guest OS username with admin/root privileges")
+	bootstrapCmd.PersistentFlags().StringVarP(&bootstrapPassFlag, "pass", "p", "", "Guest OS password")
+	bootstrapCmd.PersistentFlags().StringVar(&bootstrapRunnerUserFlag, "runner-user", "", "Automation username to act on (default: runner)")
+	// --runner-pass on parent (alias) and on subcommands that require it
+	bootstrapCmd.Flags().StringVar(&bootstrapRunnerPassFlag, "runner-pass", "", "Password to set for the automation user (required)")
+	bootstrapCreateCmd.Flags().StringVar(&bootstrapRunnerPassFlag, "runner-pass", "", "Password to set for the automation user (required)")
+	bootstrapResetCmd.Flags().StringVar(&bootstrapRunnerPassFlag, "runner-pass", "", "New password for the automation user (required)")
 }

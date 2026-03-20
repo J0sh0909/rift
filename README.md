@@ -9,6 +9,7 @@ A cross-hypervisor VM orchestration CLI built in Go.
 - **VM lifecycle management** -start, stop, suspend, reset, and query power state
 - **Parallel folder operations** -target all VMs in a VMware folder with `-f <folder>`, running eligible operations concurrently
 - **Guest exec with OS auto-detection** -run commands inside VMs; interpreter is inferred from the VMX `guestOS` key (Linux -> `/bin/bash`, Windows -> `cmd.exe`)
+- **Bootstrap provisioning** -provision the `runner` automation user on guest VMs in one command; downloads and runs the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script automatically over VMware guest tools
 - **Snapshot management** -create (with duplicate detection), list, revert, and delete snapshots; running VMs are suspended automatically before capture
 - **OVF/OVA archive pipeline** -export and import VMs via `ovftool` with per-VM mpb progress bars; versioned directory layout under `ARCHIVE_PATH`
 - **Hardware configuration** -edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
@@ -41,7 +42,26 @@ The `exec` command requires guest OS credentials to run commands inside VMs. You
 
 **Provisioning a dedicated automation user (recommended)**
 
-Use the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) companion script to create a `runner` account purpose-built for automation. The script must be executed with administrator privileges **directly inside each guest VM** -as `root` on Linux or in an elevated PowerShell session on Windows. It creates a `runner` user with a password you define and grants it escalated privileges (`sudo` on Linux, local administrator on Windows).
+Use `rift bootstrap` to provision the `runner` automation account directly from the host -no manual guest login required. The command authenticates into the guest using VMware guest tools (with an existing admin/root account), downloads the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script, and runs it inside the guest. It creates a `runner` user with the password you specify and grants it escalated privileges (`sudo` on Linux, local administrator on Windows).
+
+```
+# Provision the automation user (shorthand: rift bootstrap MyVM --runner-pass ...)
+rift bootstrap create MyVM --runner-pass <runner-pass>
+rift bootstrap create --folder MyFolder --runner-pass <runner-pass>
+rift bootstrap create MyVM --user Administrator --pass AdminPass --runner-pass <runner-pass>
+
+# Verify the automation user is correctly configured
+rift bootstrap verify MyVM
+rift bootstrap verify --folder MyFolder
+
+# Reset the automation user password
+rift bootstrap reset MyVM --runner-pass <new-password>
+rift bootstrap reset --folder MyFolder --runner-pass <new-password>
+
+# Remove the automation user
+rift bootstrap revoke MyVM
+rift bootstrap revoke --folder MyFolder
+```
 
 Once provisioned, add the following to your `.env` and all `exec` commands work without flags:
 
@@ -50,7 +70,7 @@ VM_DEFAULT_USER=runner
 VM_DEFAULT_PASS=<password chosen during bootstrap>
 ```
 
-**Usage patterns**
+**exec usage patterns**
 
 ```
 # Explicit flags -works with any existing account, no .env required
@@ -133,6 +153,13 @@ rift reset MyVM1 MyVM2
 
 # VM info
 rift info MyVM --specs --net --disk
+
+# Bootstrap the runner automation user on a guest
+rift bootstrap create MyVM --runner-pass PASSWORD
+rift bootstrap create --folder MyFolder --runner-pass PASSWORD
+rift bootstrap verify MyVM
+rift bootstrap reset MyVM --runner-pass NEWPASSWORD
+rift bootstrap revoke MyVM
 
 # Run a command inside a guest
 rift exec MyVM "whoami" --user USER --pass PASSWORD
