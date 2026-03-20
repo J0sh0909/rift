@@ -32,12 +32,14 @@ const (
 	ErrCDVDConfig    = "VM207"
 
 	// VM3xx — exec/guest operations
-	ErrExec          = "VM300"
-	ErrGuestOSNotDet = "VM301"
-	ErrGuestCmd      = "VM302"
-	ErrOutputCapture = "VM303"
-	ErrInterpreter   = "VM304"
-	ErrNotRunning    = "VM305"
+	ErrExec            = "VM300"
+	ErrGuestOSNotDet   = "VM301"
+	ErrGuestCmd        = "VM302"
+	ErrOutputCapture   = "VM303"
+	ErrInterpreter     = "VM304"
+	ErrNotRunning      = "VM305"
+	ErrBootstrapLinux   = "VM306"
+	ErrBootstrapWindows = "VM307"
 
 	// VM4xx — snapshot operations
 	ErrSnapshot     = "VM400"
@@ -103,6 +105,8 @@ var ErrorCodes = []ErrorRef{
 	{ErrOutputCapture, "output capture failed"},
 	{ErrInterpreter, "interpreter not found"},
 	{ErrNotRunning, "VM is not running (exec requires running VM)"},
+	{ErrBootstrapLinux, "bootstrap Linux operation failed"},
+	{ErrBootstrapWindows, "bootstrap Windows operation failed"},
 
 	{ErrSnapshot, "generic snapshot operation error"},
 	{ErrSnapCreate, "snapshot create failed"},
