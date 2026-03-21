@@ -21,16 +21,19 @@ func (p *ProxmoxBackend) StopVM(vmxPath string, mode ...string) error { return e
 func (p *ProxmoxBackend) SuspendVM(vmxPath string) error              { return errNotImpl }
 func (p *ProxmoxBackend) ResetVM(vmxPath string) error                { return errNotImpl }
 
-func (p *ProxmoxBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script string) (string, error) {
+func (p *ProxmoxBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
 	return "", errNotImpl
 }
-func (p *ProxmoxBackend) RunGuestProgram(vmxPath, user, pass, program string, args ...string) (string, error) {
+func (p *ProxmoxBackend) RunGuestProgram(vmxPath, user, pass, adminUser, adminPass, program string, args ...string) (string, error) {
 	return "", errNotImpl
 }
-func (p *ProxmoxBackend) CopyFileFromGuest(vmxPath, user, pass, guestPath, hostPath string) error {
+func (p *ProxmoxBackend) CopyFileFromGuest(vmxPath, user, pass, adminUser, adminPass, guestPath, hostPath string) error {
 	return errNotImpl
 }
-func (p *ProxmoxBackend) DeleteFileInGuest(vmxPath, user, pass, guestPath string) error {
+func (p *ProxmoxBackend) DeleteFileInGuest(vmxPath, user, pass, adminUser, adminPass, guestPath string) error {
+	return errNotImpl
+}
+func (p *ProxmoxBackend) ListGuestProcesses(vmxPath, user, pass, adminUser, adminPass string) error {
 	return errNotImpl
 }
 

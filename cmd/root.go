@@ -491,6 +491,92 @@ var resetCmd = &cobra.Command{
 	},
 }
 
+var restartCmd = &cobra.Command{
+	Use:   "restart [vm-names...]",
+	Short: "Restart one or more VMs (hard stop then start)",
+	Run: func(cmd *cobra.Command, args []string) {
+		requireSettings()
+		targets, err := internal.ResolveTargets(hv, folderFlag, args)
+		exitOnErr(err)
+		exitOnErr(hv.EnsureVMwareRunning())
+
+		if folderFlag == "" {
+			for _, vm := range targets {
+				if !vm.Running {
+					internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+					continue
+				}
+				internal.LogInfo(vm.Name, "restarting...")
+				if err := hv.StopVM(vm.Path, "hard"); err != nil {
+					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					continue
+				}
+				if err := hv.StartVM(vm.Path); err != nil {
+					internal.LogError(internal.ErrStartFailed, vm.Name, "%s", err)
+					continue
+				}
+				internal.LogInfo(vm.Name, "restarted")
+			}
+			return
+		}
+
+		// Folder mode: stop all in parallel, then start all in parallel.
+		var (
+			mu      sync.Mutex
+			stopped []internal.VM
+			wg      sync.WaitGroup
+		)
+		// Phase 1: stop all
+		for _, vm := range targets {
+			if !vm.Running {
+				internal.LogError(internal.ErrAlreadyStopped, vm.Name, "already stopped")
+				continue
+			}
+			internal.LogInfo(vm.Name, "restarting...")
+			wg.Add(1)
+			go func(vm internal.VM) {
+				defer wg.Done()
+				if err := hv.StopVM(vm.Path, "hard"); err != nil {
+					internal.LogError(internal.ErrStopFailed, vm.Name, "%s", err)
+					return
+				}
+				mu.Lock()
+				stopped = append(stopped, vm)
+				mu.Unlock()
+			}(vm)
+		}
+		wg.Wait()
+
+		// Phase 2: start all that stopped successfully
+		var results []powerResult
+		for _, vm := range stopped {
+			wg.Add(1)
+			go func(vm internal.VM) {
+				defer wg.Done()
+				var r powerResult
+				if err := hv.StartVM(vm.Path); err != nil {
+					r = powerResult{vm.Name, internal.ErrStartFailed, err.Error()}
+				} else {
+					r = powerResult{vm.Name, "", "restarted"}
+				}
+				mu.Lock()
+				results = append(results, r)
+				mu.Unlock()
+			}(vm)
+		}
+		wg.Wait()
+
+		sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+		for _, r := range results {
+			if r.code != "" {
+				internal.LogError(r.code, r.name, "%s", r.msg)
+			} else {
+				internal.LogInfo(r.name, r.msg)
+			}
+		}
+	},
+}
+
 // ---------------------------------------------------------------------------
 // exec
 // ---------------------------------------------------------------------------
@@ -567,30 +653,30 @@ var execCmd = &cobra.Command{
 
 			if isWindows {
 				guestOutputPath := `C:\Windows\Temp\rift-exec-output.txt`
-				if _, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
+				if _, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+script+` > C:\Windows\Temp\rift-exec-output.txt`); err != nil {
 					internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
 				tmpFile, err := os.CreateTemp("", "rift-exec-*")
 				if err != nil {
-					_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+					_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
 					return result{vm.Name, ""}
 				}
 				hostPath := tmpFile.Name()
 				tmpFile.Close()
 
-				if err := hv.CopyFileFromGuest(vm.Path, user, pass, guestOutputPath, hostPath); err != nil {
+				if err := hv.CopyFileFromGuest(vm.Path, user, pass, "", "", guestOutputPath, hostPath); err != nil {
 					os.Remove(hostPath)
-					_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+					_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "%s", err)
 					return result{vm.Name, ""}
 				}
 
 				data, readErr := os.ReadFile(hostPath)
 				os.Remove(hostPath)
-				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				if readErr != nil {
 					internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
 					return result{vm.Name, ""}
@@ -600,30 +686,30 @@ var execCmd = &cobra.Command{
 			// Linux/non-Windows: temp file redirect
 			guestOutputPath := "/tmp/rift-exec-output.txt"
 			wrappedScript := script + " > /tmp/rift-exec-output.txt 2>&1"
-			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript); err != nil {
+			if _, err := hv.RunGuestCommand(vm.Path, user, pass, interpreter, wrappedScript, "", ""); err != nil {
 				internal.LogError(internal.ErrGuestCmd, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
 			tmpFile, err := os.CreateTemp("", "rift-exec-*")
 			if err != nil {
-				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to create temp file: %s", err)
 				return result{vm.Name, ""}
 			}
 			hostPath := tmpFile.Name()
 			tmpFile.Close()
 
-			if err := hv.CopyFileFromGuest(vm.Path, user, pass, guestOutputPath, hostPath); err != nil {
+			if err := hv.CopyFileFromGuest(vm.Path, user, pass, "", "", guestOutputPath, hostPath); err != nil {
 				os.Remove(hostPath)
-				_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+				_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "%s", err)
 				return result{vm.Name, ""}
 			}
 
 			data, readErr := os.ReadFile(hostPath)
 			os.Remove(hostPath)
-			_ = hv.DeleteFileInGuest(vm.Path, user, pass, guestOutputPath)
+			_ = hv.DeleteFileInGuest(vm.Path, user, pass, "", "", guestOutputPath)
 			if readErr != nil {
 				internal.LogError(internal.ErrOutputCapture, vm.Name, "failed to read output: %s", readErr)
 				return result{vm.Name, ""}
@@ -673,8 +759,9 @@ var execCmd = &cobra.Command{
 // ---------------------------------------------------------------------------
 
 // winCmd runs a single cmd.exe /c command in a Windows guest and returns any error.
+// The caller's user/pass are assumed to be admin-level; no hostname retry fallback.
 func winCmd(vm internal.VM, user, pass, arg string) error {
-	_, err := hv.RunGuestProgram(vm.Path, user, pass, `C:\Windows\System32\cmd.exe`, "/c "+arg)
+	_, err := hv.RunGuestProgram(vm.Path, user, pass, "", "", `C:\Windows\System32\cmd.exe`, "/c "+arg)
 	return err
 }
 
@@ -683,7 +770,7 @@ func winCmd(vm internal.VM, user, pass, arg string) error {
 // linuxInner is the command string run inside sudo -S bash -c '...'.
 func bootstrapRunLinux(vm internal.VM, user, pass, linuxInner, successMsg string) powerResult {
 	if _, err := hv.RunGuestCommand(vm.Path, user, pass, "/bin/bash",
-		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`); err != nil {
+		`echo '`+pass+`' | sudo -S bash -c '`+linuxInner+`'`, "", ""); err != nil {
 		return powerResult{vm.Name, internal.ErrBootstrapLinux, "failed: " + err.Error()}
 	}
 	return powerResult{vm.Name, "", successMsg}
@@ -716,8 +803,10 @@ func bootstrapWindowsCreate(vm internal.VM, user, pass, ru, rp string) powerResu
 func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	allOK := true
 
-	// Check 1: user exists
-	if winCmd(vm, user, pass, `net user `+ru) == nil {
+	// Check 1: user exists.
+	// >nul 2>&1 is required — runProgramInGuest returns bogus exit codes
+	// when commands produce console output.
+	if winCmd(vm, user, pass, `net user `+ru+` >nul 2>&1`) == nil {
 		fmt.Printf("[%s]   [OK]   user '%s' exists\n", vm.Name, ru)
 	} else {
 		fmt.Printf("[%s]   [FAIL] user '%s' does not exist\n", vm.Name, ru)
@@ -725,8 +814,7 @@ func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	}
 
 	// Check 2: user is in the local Administrators group.
-	// "net user <name>" lists group memberships; pipe through findstr to check.
-	// Search for "Administ" — common prefix across Administrators/Administrateurs/Administratoren/Administradores.
+	// Search for "Administ" — common prefix across locales (EN/FR/DE/ES).
 	// Fallback: list the group directly by English or French name.
 	inAdmin := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Administ`) == nil
 	if !inAdmin {
@@ -751,7 +839,12 @@ func bootstrapWindowsVerify(vm internal.VM, user, pass, ru string) powerResult {
 	}
 
 	// Check 4: password expiry disabled.
-	if winCmd(vm, user, pass, `wmic useraccount where name='`+ru+`' get PasswordExpires | findstr /I FALSE`) == nil {
+	// "net user <name>" shows "Jamais" (FR) or "Never" (EN) when expiry is off.
+	noExpiry := winCmd(vm, user, pass, `net user `+ru+` | findstr /I Jamais`) == nil
+	if !noExpiry {
+		noExpiry = winCmd(vm, user, pass, `net user `+ru+` | findstr /I Never`) == nil
+	}
+	if noExpiry {
 		fmt.Printf("[%s]   [OK]   password expiry disabled\n", vm.Name)
 	} else {
 		fmt.Printf("[%s]   [FAIL] password expiry is not disabled\n", vm.Name)
@@ -781,7 +874,7 @@ func bootstrapWindowsRevoke(vm internal.VM, user, pass, ru string) powerResult {
 }
 
 // bootstrapAdminAuth resolves guest credentials from flags only — no .env fallback.
-// Use this for operations that must run as an admin (verify, revoke).
+// Use this for operations that must run as an admin (create, revoke).
 func bootstrapAdminAuth(userFlag, passFlag string) (user, pass string, ok bool) {
 	if userFlag == "" || passFlag == "" {
 		fmt.Fprintln(os.Stderr, "error: --user and --pass are required (admin credentials needed)")
@@ -886,10 +979,14 @@ var bootstrapVerifyCmd = &cobra.Command{
 		requireSettings()
 		targets, err := internal.ResolveTargets(hv, folderFlag, args)
 		exitOnErr(err)
-		user, pass, ok := bootstrapAdminAuth(bootstrapUserFlag, bootstrapPassFlag)
+		// Admin creds for system checks: --user/--pass → .env fallback.
+		adminUser, adminPass, ok := bootstrapAuth(bootstrapUserFlag, bootstrapPassFlag)
 		if !ok {
 			return
 		}
+		// Runner creds for the final auth test: always from .env.
+		runnerUser := settings.DefaultUser
+		runnerPass := settings.DefaultPass
 		ru := bootstrapEffectiveRunnerUser()
 		bootstrapDispatch(targets, func(vm internal.VM) powerResult {
 			if !vm.Running {
@@ -902,9 +999,9 @@ var bootstrapVerifyCmd = &cobra.Command{
 			isWin := strings.HasPrefix(strings.ToLower(guestOS), "windows")
 			var r powerResult
 			if isWin {
-				r = bootstrapWindowsVerify(vm, user, pass, ru)
+				r = bootstrapWindowsVerify(vm, adminUser, adminPass, ru)
 			} else {
-				r = bootstrapRunLinux(vm, user, pass,
+				r = bootstrapRunLinux(vm, adminUser, adminPass,
 					`curl -sL https://raw.githubusercontent.com/J0sh0909/bootstrap-utilities/main/verify/verify-linux.sh -o /tmp/verify.sh && chmod +x /tmp/verify.sh && /tmp/verify.sh `+ru,
 					"verify passed",
 				)
@@ -912,13 +1009,16 @@ var bootstrapVerifyCmd = &cobra.Command{
 			if r.code != "" {
 				return r
 			}
-			runnerUser := settings.DefaultUser
-			runnerPass := settings.DefaultPass
+			if runnerUser == "" || runnerPass == "" {
+				return powerResult{vm.Name, "", "verify passed (runner auth skipped — VM_DEFAULT_USER/VM_DEFAULT_PASS not set)"}
+			}
 			var authErr error
 			if isWin {
-				_, authErr = hv.RunGuestProgram(vm.Path, runnerUser, runnerPass, `C:\Windows\System32\cmd.exe`, `/c whoami`)
+				// runProgramInGuest rejects valid credentials for non-original
+				// users on Windows 10. listProcessesInGuest works reliably.
+				authErr = hv.ListGuestProcesses(vm.Path, runnerUser, runnerPass, adminUser, adminPass)
 			} else {
-				_, authErr = hv.RunGuestCommand(vm.Path, runnerUser, runnerPass, "/bin/bash", "whoami")
+				_, authErr = hv.RunGuestCommand(vm.Path, runnerUser, runnerPass, "/bin/bash", "whoami", adminUser, adminPass)
 			}
 			if authErr == nil {
 				return powerResult{vm.Name, "", "verify passed (runner auth OK)"}
@@ -2377,6 +2477,7 @@ func init() {
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(suspendCmd)
 	rootCmd.AddCommand(resetCmd)
+	rootCmd.AddCommand(restartCmd)
 	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(bootstrapCmd)
 	bootstrapCmd.AddCommand(bootstrapCreateCmd)
@@ -2428,7 +2529,7 @@ func init() {
 
 	// Folder flag on all commands that support it
 	for _, cmd := range []*cobra.Command{
-		startCmd, stopCmd, suspendCmd, resetCmd, execCmd, infoCmd,
+		startCmd, stopCmd, suspendCmd, resetCmd, restartCmd, execCmd, infoCmd,
 		bootstrapCmd, bootstrapCreateCmd, bootstrapVerifyCmd, bootstrapResetCmd, bootstrapRevokeCmd,
 		configCpuCmd, configRamCmd, configNicCmd, configDisplayCmd, configOsCmd,
 		configDiskAddCmd, configDiskRemoveCmd, configDiskExpandCmd,

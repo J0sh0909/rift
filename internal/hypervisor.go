@@ -22,10 +22,13 @@ type Hypervisor interface {
 	ResetVM(vmxPath string) error
 
 	// Guest operations
-	RunGuestCommand(vmxPath, user, pass, interpreter, script string) (string, error)
-	RunGuestProgram(vmxPath, user, pass, program string, args ...string) (string, error)
-	CopyFileFromGuest(vmxPath, user, pass, guestPath, hostPath string) error
-	DeleteFileInGuest(vmxPath, user, pass, guestPath string) error
+	// adminUser/adminPass are optional fallback credentials for hostname-prefixed
+	// auth retry on Windows guests. Pass empty strings to skip the retry.
+	RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error)
+	RunGuestProgram(vmxPath, user, pass, adminUser, adminPass, program string, args ...string) (string, error)
+	CopyFileFromGuest(vmxPath, user, pass, adminUser, adminPass, guestPath, hostPath string) error
+	DeleteFileInGuest(vmxPath, user, pass, adminUser, adminPass, guestPath string) error
+	ListGuestProcesses(vmxPath, user, pass, adminUser, adminPass string) error
 
 	// Snapshot operations
 	CreateSnapshot(vmxPath, name string) error
