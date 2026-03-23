@@ -20,6 +20,7 @@ func (p *ProxmoxBackend) StartVM(vmxPath string) error                { return e
 func (p *ProxmoxBackend) StopVM(vmxPath string, mode ...string) error { return errNotImpl }
 func (p *ProxmoxBackend) SuspendVM(vmxPath string) error              { return errNotImpl }
 func (p *ProxmoxBackend) ResetVM(vmxPath string) error                { return errNotImpl }
+func (p *ProxmoxBackend) WarmEncryptionCache(_ []string)              {}
 
 func (p *ProxmoxBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
 	return "", errNotImpl

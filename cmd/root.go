@@ -132,6 +132,57 @@ type powerResult struct {
 }
 
 func runPowerParallel(targets []internal.VM, action func(internal.VM) powerResult) {
+	// Pre-read VMX files sequentially so goroutines don't all hit the
+	// filesystem at once (which disrupts vmrun timing on Windows).
+	paths := make([]string, len(targets))
+	for i, vm := range targets {
+		paths[i] = vm.Path
+	}
+	hv.WarmEncryptionCache(paths)
+
+	// Run all targets in parallel, then silently retry failures up to 3
+	// attempts total. VMware's vmrun intermittently returns 0xffffffff when
+	// too many calls run concurrently — retries resolve this without
+	// limiting parallelism.
+	results := runPowerBatch(targets, action)
+	for attempt := 1; attempt < 3; attempt++ {
+		var failed []internal.VM
+		for _, r := range results {
+			if r.code != "" {
+				for _, vm := range targets {
+					if vm.Name == r.name {
+						failed = append(failed, vm)
+						break
+					}
+				}
+			}
+		}
+		if len(failed) == 0 {
+			break
+		}
+		retried := runPowerBatch(failed, action)
+		retryMap := make(map[string]powerResult, len(retried))
+		for _, r := range retried {
+			retryMap[r.name] = r
+		}
+		for i, r := range results {
+			if rr, ok := retryMap[r.name]; ok {
+				results[i] = rr
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	for _, r := range results {
+		if r.code != "" {
+			internal.LogError(r.code, r.name, "%s", r.msg)
+		} else {
+			internal.LogInfo(r.name, r.msg)
+		}
+	}
+}
+
+func runPowerBatch(targets []internal.VM, action func(internal.VM) powerResult) []powerResult {
 	var (
 		mu      sync.Mutex
 		results []powerResult
@@ -148,14 +199,7 @@ func runPowerParallel(targets []internal.VM, action func(internal.VM) powerResul
 		}(vm)
 	}
 	wg.Wait()
-	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
-	for _, r := range results {
-		if r.code != "" {
-			internal.LogError(r.code, r.name, "%s", r.msg)
-		} else {
-			internal.LogInfo(r.name, r.msg)
-		}
-	}
+	return results
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,11 @@ import (
 type WorkstationBackend struct {
 	s Settings
 
+	// encryptionCache caches per-VMX encryption status so vpArgsForVM
+	// doesn't re-parse the VMX file on every vmrun call. Keys are vmxPath,
+	// values are bool (true = encrypted).
+	encryptionCache sync.Map
+
 	// hostnameCache maps vmxPath → cached Windows computer name.
 	// Populated lazily on first auth retry for each VM.
 	hostnameMu    sync.Mutex
@@ -50,8 +55,15 @@ func isEncryptedVM(vmxPath string) bool {
 // vpArgsForVM returns the -vp <password> prefix if the VM is encrypted and a
 // password is configured. Prints a warning to stderr if encrypted but no
 // password is available. Returns nil for non-encrypted VMs.
+// The encryption check is cached per VMX path so concurrent goroutines don't
+// all parse the same file simultaneously.
 func (w *WorkstationBackend) vpArgsForVM(vmxPath string) []string {
-	if !isEncryptedVM(vmxPath) {
+	encrypted, ok := w.encryptionCache.Load(vmxPath)
+	if !ok {
+		encrypted = isEncryptedVM(vmxPath)
+		w.encryptionCache.Store(vmxPath, encrypted)
+	}
+	if !encrypted.(bool) {
 		return nil
 	}
 	if w.s.EncryptionPass != "" {
@@ -174,6 +186,17 @@ func (w *WorkstationBackend) GetPowerState() ([]VM, error) {
 // ---------------------------------------------------------------------------
 // Power Operations
 // ---------------------------------------------------------------------------
+
+// WarmEncryptionCache pre-reads VMX files sequentially to populate the
+// encryptionCache. Subsequent vpArgsForVM calls return from cache instantly,
+// avoiding concurrent file I/O that disrupts vmrun timing.
+func (w *WorkstationBackend) WarmEncryptionCache(vmxPaths []string) {
+	for _, p := range vmxPaths {
+		if _, ok := w.encryptionCache.Load(p); !ok {
+			w.encryptionCache.Store(p, isEncryptedVM(p))
+		}
+	}
+}
 
 func (w *WorkstationBackend) StartVM(vmxPath string) error {
 	args := append(w.vpArgsForVM(vmxPath), "start", vmxPath, "nogui")
