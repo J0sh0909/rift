@@ -41,6 +41,10 @@ type Hypervisor interface {
 	ExportVM(vmxPath, destPath string) error
 	ExportVMWithBar(vmxPath, destPath string, bar *mpb.Bar) error
 	ImportVM(srcPath, destVmxPath string) error
+
+	// WarmEncryptionCache pre-reads VMX files sequentially so that parallel
+	// power operations don't all hit the filesystem at once.
+	WarmEncryptionCache(vmxPaths []string)
 }
 
 // NewHypervisor creates a Hypervisor from settings.
