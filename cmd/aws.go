@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,32 +18,35 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	awsAllFlag        bool
-	awsHardFlag       bool
-	awsYesFlag        bool
-	awsAMIFlag        string
-	awsNameFlag       string
-	awsTypeFlag       string
-	awsRegionFlag     string
-	awsUserFlag       string
-	awsEncryptAllFlag bool
+	awsAllFlag    bool
+	awsHardFlag   bool
+	awsYesFlag    bool
+	awsAMIFlag    string
+	awsNameFlag   string
+	awsTypeFlag   string
+	awsRegionFlag string
+	awsUserFlag   string
+	awsKeyFlag    string
 )
 
 // ---------------------------------------------------------------------------
 // Lazy AWS backend
 // ---------------------------------------------------------------------------
 
-var awsBackend *internal.AWSBackend
+var (
+	awsBackend  *internal.AWSBackend
+	awsSettings internal.Settings
+)
 
 func requireAWS() {
 	if awsBackend != nil {
 		return
 	}
-	// Load settings for AWS_REGION (best-effort; .env is optional for AWS).
-	s, _ := internal.LoadSettings()
+	// Load settings for AWS_REGION/AWS_KEY_DIR (best-effort; .env is optional for AWS).
+	awsSettings, _ = internal.LoadSettings()
 	region := awsRegionFlag
 	if region == "" {
-		region = s.AWSRegion // may still be empty — SDK falls back to ~/.aws/config
+		region = awsSettings.AWSRegion
 	}
 	var err error
 	awsBackend, err = internal.NewAWSBackend(region)
@@ -49,6 +54,99 @@ func requireAWS() {
 		internal.LogError(internal.ErrAWS, "", "initializing AWS: %s", err)
 		os.Exit(1)
 	}
+}
+
+// awsKeyPath returns the full path for a .pem file, using AWS_KEY_DIR if set.
+func awsKeyPath(keyName string) string {
+	filename := keyName + ".pem"
+	if awsSettings.AWSKeyDir != "" {
+		return filepath.Join(awsSettings.AWSKeyDir, filename)
+	}
+	return filename
+}
+
+// ---------------------------------------------------------------------------
+// State management — rift-state.json
+// ---------------------------------------------------------------------------
+
+// RiftState is the top-level state file structure.
+type RiftState struct {
+	Instances []RiftInstance `json:"instances"`
+}
+
+// RiftInstance tracks resources created by a single rift aws create.
+type RiftInstance struct {
+	InstanceID      string `json:"instance_id"`
+	Name            string `json:"name"`
+	KeyPairName     string `json:"key_pair_name"`
+	SecurityGroupID string `json:"security_group_id"`
+	EIPAllocationID string `json:"eip_allocation_id,omitempty"`
+	SubnetID        string `json:"subnet_id"`
+	AMI             string `json:"ami"`
+	InstanceType    string `json:"instance_type"`
+	CreatedAt       string `json:"created_at"`
+}
+
+func statePath() string {
+	if awsSettings.RiftStatePath != "" {
+		return awsSettings.RiftStatePath
+	}
+	return "rift-state.json"
+}
+
+func loadState() RiftState {
+	data, err := os.ReadFile(statePath())
+	if err != nil {
+		return RiftState{}
+	}
+	var s RiftState
+	json.Unmarshal(data, &s)
+	return s
+}
+
+func saveState(s RiftState) error {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(statePath(), data, 0644)
+}
+
+func stateAddInstance(ri RiftInstance) {
+	s := loadState()
+	s.Instances = append(s.Instances, ri)
+	if err := saveState(s); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: saving state: %s\n", err)
+	}
+}
+
+func stateRemoveInstance(instanceID string) RiftInstance {
+	s := loadState()
+	var removed RiftInstance
+	var kept []RiftInstance
+	for _, ri := range s.Instances {
+		if ri.InstanceID == instanceID {
+			removed = ri
+		} else {
+			kept = append(kept, ri)
+		}
+	}
+	s.Instances = kept
+	if err := saveState(s); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: saving state: %s\n", err)
+	}
+	return removed
+}
+
+// keyPairInUse returns true if any other instance in state uses this key pair.
+func keyPairInUse(keyName, excludeInstanceID string) bool {
+	s := loadState()
+	for _, ri := range s.Instances {
+		if ri.KeyPairName == keyName && ri.InstanceID != excludeInstanceID {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -183,19 +281,32 @@ var awsCreateCmd = &cobra.Command{
 			instType = "t2.micro"
 		}
 
-		// 1. Create key pair.
-		keyName := "rift-" + awsNameFlag
-		pemData, err := awsBackend.CreateKeyPair(keyName)
-		if err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, "", "creating key pair: %s", err)
-			os.Exit(1)
+		// 1. Key pair — reuse via --key or create new.
+		keyName := awsKeyFlag
+		pemPath := ""
+		if keyName != "" {
+			// Reuse existing key pair.
+			pemPath = awsKeyPath(keyName)
+			fmt.Printf("key pair → %s (reusing)\n", keyName)
+		} else {
+			keyName = "rift-" + awsNameFlag
+			pemPath = awsKeyPath(keyName)
+			// If .pem already exists locally, assume the AWS key pair exists too.
+			if _, err := os.Stat(pemPath); err == nil {
+				fmt.Printf("key pair → %s (existing)\n", pemPath)
+			} else {
+				pemData, err := awsBackend.CreateKeyPair(keyName)
+				if err != nil {
+					internal.LogError(internal.ErrAWSCreateFailed, "", "creating key pair: %s", err)
+					os.Exit(1)
+				}
+				if err := os.WriteFile(pemPath, []byte(pemData), 0600); err != nil {
+					internal.LogError(internal.ErrAWSCreateFailed, "", "writing key file: %s", err)
+					os.Exit(1)
+				}
+				fmt.Printf("key pair → %s\n", pemPath)
+			}
 		}
-		pemPath := keyName + ".pem"
-		if err := os.WriteFile(pemPath, []byte(pemData), 0600); err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, "", "writing key file: %s", err)
-			os.Exit(1)
-		}
-		fmt.Printf("key pair → %s\n", pemPath)
 
 		// 2. Get default VPC + subnet.
 		vpcID, err := awsBackend.GetDefaultVPC()
@@ -231,16 +342,31 @@ var awsCreateCmd = &cobra.Command{
 		}
 
 		// 6. Elastic IP.
-		publicIP, err := awsBackend.AllocateAndAssociateEIP(instanceID)
-		if err != nil {
-			internal.LogError(internal.ErrAWSCreateFailed, instanceID, "elastic IP: %s", err)
-			// Non-fatal — instance is running, just no EIP.
+		var eipAllocID string
+		publicIP, allocID, eipErr := awsBackend.AllocateAndAssociateEIP(instanceID)
+		if eipErr != nil {
+			internal.LogError(internal.ErrAWSCreateFailed, instanceID, "elastic IP: %s", eipErr)
+		} else {
+			eipAllocID = allocID
 		}
 
 		inst, _ := awsBackend.GetInstance(instanceID)
 		if publicIP == "" {
 			publicIP = inst.PublicIP
 		}
+
+		// 7. Save to state file.
+		stateAddInstance(RiftInstance{
+			InstanceID:      instanceID,
+			Name:            awsNameFlag,
+			KeyPairName:     keyName,
+			SecurityGroupID: sgID,
+			EIPAllocationID: eipAllocID,
+			SubnetID:        subnetID,
+			AMI:             awsAMIFlag,
+			InstanceType:    instType,
+			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		})
 
 		fmt.Println(strings.Repeat("-", 50))
 		fmt.Printf("instance:  %s\n", instanceID)
@@ -259,7 +385,7 @@ var awsCreateCmd = &cobra.Command{
 
 var awsTerminateCmd = &cobra.Command{
 	Use:   "terminate <instance-id> [instance-id...]",
-	Short: "Terminate EC2 instances",
+	Short: "Terminate EC2 instances and clean up resources",
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		requireAWS()
@@ -267,18 +393,114 @@ var awsTerminateCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "error: --yes is required to confirm termination\n")
 			os.Exit(1)
 		}
-		// Release EIPs first.
 		for _, id := range args {
-			if err := awsBackend.ReleaseInstanceEIPs(id); err != nil {
-				fmt.Fprintf(os.Stderr, "%s: warning: releasing EIP: %s\n", id, err)
-			}
+			awsTerminateOne(id)
 		}
-		if err := awsBackend.TerminateInstances(args); err != nil {
-			internal.LogError(internal.ErrAWSTermFailed, "", "%s", err)
+	},
+}
+
+func awsTerminateOne(id string) {
+	ri := stateRemoveInstance(id)
+
+	// Release EIP from state if tracked, otherwise try discovery.
+	if ri.EIPAllocationID != "" {
+		if err := awsBackend.ReleaseEIP(ri.EIPAllocationID); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: warning: releasing EIP: %s\n", id, err)
+		} else {
+			fmt.Printf("%s → released Elastic IP\n", id)
+		}
+	} else {
+		if err := awsBackend.ReleaseInstanceEIPs(id); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: warning: releasing EIP: %s\n", id, err)
+		}
+	}
+
+	// Delete key pair from AWS if no other instances use it.
+	if ri.KeyPairName != "" && !keyPairInUse(ri.KeyPairName, id) {
+		if err := awsBackend.DeleteKeyPair(ri.KeyPairName); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: warning: deleting key pair: %s\n", id, err)
+		} else {
+			fmt.Printf("%s → deleted key pair %s\n", id, ri.KeyPairName)
+		}
+	}
+
+	// Terminate.
+	if err := awsBackend.TerminateInstances([]string{id}); err != nil {
+		internal.LogError(internal.ErrAWSTermFailed, id, "%s", err)
+		return
+	}
+	fmt.Printf("%s → terminated\n", id)
+}
+
+// ---------------------------------------------------------------------------
+// rift aws destroy
+// ---------------------------------------------------------------------------
+
+var awsDestroyCmd = &cobra.Command{
+	Use:   "destroy",
+	Short: "Terminate ALL rift-managed instances and clean up resources",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		requireAWS()
+		if !awsYesFlag {
+			fmt.Fprintf(os.Stderr, "error: --yes is required to confirm destruction\n")
 			os.Exit(1)
 		}
-		for _, id := range args {
-			fmt.Printf("%s → terminated\n", id)
+		state := loadState()
+		if len(state.Instances) == 0 {
+			fmt.Println("No rift-managed instances found.")
+			return
+		}
+		fmt.Printf("Destroying %d rift-managed instance(s)...\n", len(state.Instances))
+
+		// Collect unique security groups before removing state entries.
+		sgIDs := map[string]bool{}
+		for _, ri := range state.Instances {
+			if ri.SecurityGroupID != "" {
+				sgIDs[ri.SecurityGroupID] = true
+			}
+		}
+
+		for _, ri := range state.Instances {
+			awsTerminateOne(ri.InstanceID)
+		}
+
+		// Try to delete security groups now that no instances reference them.
+		for sgID := range sgIDs {
+			if err := awsBackend.DeleteSecurityGroup(sgID); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: deleting security group %s: %s\n", sgID, err)
+			} else {
+				fmt.Printf("deleted security group %s\n", sgID)
+			}
+		}
+	},
+}
+
+// ---------------------------------------------------------------------------
+// rift aws state
+// ---------------------------------------------------------------------------
+
+var awsStateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "Show rift-managed AWS resources",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		requireAWS()
+		state := loadState()
+		if len(state.Instances) == 0 {
+			fmt.Println("No rift-managed instances.")
+			return
+		}
+		fmt.Printf("%-20s %-20s %-14s %-20s %-16s %s\n",
+			"INSTANCE ID", "NAME", "TYPE", "KEY PAIR", "EIP ALLOC", "CREATED")
+		fmt.Println(strings.Repeat("-", 115))
+		for _, ri := range state.Instances {
+			eip := ri.EIPAllocationID
+			if eip == "" {
+				eip = "-"
+			}
+			fmt.Printf("%-20s %-20s %-14s %-20s %-16s %s\n",
+				ri.InstanceID, ri.Name, ri.InstanceType, ri.KeyPairName, eip, ri.CreatedAt)
 		}
 	},
 }
@@ -306,10 +528,10 @@ var awsSSHCmd = &cobra.Command{
 		if user == "" {
 			user = internal.GuessSSHUser(inst.Platform)
 		}
-		pemPath := "rift-" + inst.KeyName + ".pem"
-		// If that doesn't exist, try just keyname.pem.
+		pemPath := awsKeyPath(inst.KeyName)
+		// If that doesn't exist, try without the rift- prefix.
 		if _, err := os.Stat(pemPath); err != nil {
-			pemPath = inst.KeyName + ".pem"
+			pemPath = awsKeyPath(strings.TrimPrefix(inst.KeyName, "rift-"))
 		}
 		sshCmd := fmt.Sprintf("ssh -i %s %s@%s", pemPath, user, inst.PublicIP)
 		fmt.Println(sshCmd)
@@ -360,15 +582,19 @@ func init() {
 	awsCmd.AddCommand(awsStopCmd)
 	awsCmd.AddCommand(awsCreateCmd)
 	awsCmd.AddCommand(awsTerminateCmd)
+	awsCmd.AddCommand(awsDestroyCmd)
+	awsCmd.AddCommand(awsStateCmd)
 	awsCmd.AddCommand(awsSSHCmd)
 	awsCmd.AddCommand(awsIPCmd)
 
 	awsListCmd.Flags().BoolVar(&awsAllFlag, "all", false, "Include terminated instances")
 	awsStopCmd.Flags().BoolVarP(&awsHardFlag, "hard", "H", false, "Force stop")
 	awsTerminateCmd.Flags().BoolVarP(&awsYesFlag, "yes", "y", false, "Confirm termination")
+	awsDestroyCmd.Flags().BoolVarP(&awsYesFlag, "yes", "y", false, "Confirm destruction")
 	awsCreateCmd.Flags().StringVar(&awsAMIFlag, "ami", "", "AMI ID (required)")
 	awsCreateCmd.Flags().StringVar(&awsNameFlag, "name", "", "Instance name (required)")
 	awsCreateCmd.Flags().StringVar(&awsTypeFlag, "type", "t2.micro", "Instance type")
+	awsCreateCmd.Flags().StringVar(&awsKeyFlag, "key", "", "Reuse existing AWS key pair by name")
 	awsCmd.PersistentFlags().StringVar(&awsRegionFlag, "region", "", "AWS region (overrides AWS_REGION from .env)")
 	awsSSHCmd.Flags().StringVarP(&awsUserFlag, "user", "u", "", "SSH username (default: auto-detect from AMI)")
 }

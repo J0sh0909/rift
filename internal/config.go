@@ -23,6 +23,8 @@ type Settings struct {
 	DefaultPass    string
 	EncryptionPass string
 	AWSRegion      string
+	AWSKeyDir      string
+	RiftStatePath  string
 }
 
 // HostResources holds detected host hardware limits
@@ -56,6 +58,8 @@ func LoadSettings() (Settings, error) {
 		DefaultPass:    os.Getenv("VM_DEFAULT_PASS"),
 		EncryptionPass: os.Getenv("VM_ENCRYPTION_PASS"),
 		AWSRegion:      os.Getenv("AWS_REGION"),
+		AWSKeyDir:      os.Getenv("AWS_KEY_DIR"),
+		RiftStatePath:  os.Getenv("RIFT_STATE_PATH"),
 	}
 
 	if s.VmrunPath == "" || s.VmDirectory == "" || s.VmInventory == "" || s.NetmapPath == "" || s.IsoDirectory == "" || s.VdiskPath == "" {

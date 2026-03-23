@@ -217,7 +217,7 @@ func (a *AWSBackend) EnsureSecurityGroup(vpcID string) (string, error) {
 	// Create it.
 	create, err := a.Client.CreateSecurityGroup(context.Background(), &ec2.CreateSecurityGroupInput{
 		GroupName:   aws.String(sgName),
-		Description: aws.String("Rift default — SSH + RDP inbound"),
+		Description: aws.String("Rift default - SSH and RDP inbound"),
 		VpcId:       aws.String(vpcID),
 		TagSpecifications: []types.TagSpecification{{
 			ResourceType: types.ResourceTypeSecurityGroup,
@@ -271,8 +271,8 @@ func (a *AWSBackend) GetFirstSubnet(vpcID string) (string, error) {
 }
 
 // AllocateAndAssociateEIP allocates an Elastic IP and associates it with an instance.
-// Returns the public IP address.
-func (a *AWSBackend) AllocateAndAssociateEIP(instanceID string) (string, error) {
+// Returns the public IP address and allocation ID.
+func (a *AWSBackend) AllocateAndAssociateEIP(instanceID string) (publicIP, allocationID string, err error) {
 	alloc, err := a.Client.AllocateAddress(context.Background(), &ec2.AllocateAddressInput{
 		Domain: types.DomainTypeVpc,
 		TagSpecifications: []types.TagSpecification{{
@@ -281,16 +281,16 @@ func (a *AWSBackend) AllocateAndAssociateEIP(instanceID string) (string, error) 
 		}},
 	})
 	if err != nil {
-		return "", fmt.Errorf("allocating EIP: %w", err)
+		return "", "", fmt.Errorf("allocating EIP: %w", err)
 	}
 	_, err = a.Client.AssociateAddress(context.Background(), &ec2.AssociateAddressInput{
 		AllocationId: alloc.AllocationId,
 		InstanceId:   aws.String(instanceID),
 	})
 	if err != nil {
-		return "", fmt.Errorf("associating EIP: %w", err)
+		return "", "", fmt.Errorf("associating EIP: %w", err)
 	}
-	return aws.ToString(alloc.PublicIp), nil
+	return aws.ToString(alloc.PublicIp), aws.ToString(alloc.AllocationId), nil
 }
 
 // ReleaseInstanceEIPs finds and releases any Elastic IPs associated with an instance.
@@ -314,6 +314,43 @@ func (a *AWSBackend) ReleaseInstanceEIPs(instanceID string) error {
 		}
 	}
 	return nil
+}
+
+// DeleteKeyPair deletes an AWS key pair by name.
+func (a *AWSBackend) DeleteKeyPair(name string) error {
+	_, err := a.Client.DeleteKeyPair(context.Background(), &ec2.DeleteKeyPairInput{
+		KeyName: aws.String(name),
+	})
+	return err
+}
+
+// ReleaseEIP releases an Elastic IP by allocation ID.
+func (a *AWSBackend) ReleaseEIP(allocationID string) error {
+	// Disassociate first (best-effort).
+	addrs, err := a.Client.DescribeAddresses(context.Background(), &ec2.DescribeAddressesInput{
+		AllocationIds: []string{allocationID},
+	})
+	if err == nil {
+		for _, addr := range addrs.Addresses {
+			if addr.AssociationId != nil {
+				a.Client.DisassociateAddress(context.Background(), &ec2.DisassociateAddressInput{
+					AssociationId: addr.AssociationId,
+				})
+			}
+		}
+	}
+	_, err = a.Client.ReleaseAddress(context.Background(), &ec2.ReleaseAddressInput{
+		AllocationId: aws.String(allocationID),
+	})
+	return err
+}
+
+// DeleteSecurityGroup deletes a security group by ID.
+func (a *AWSBackend) DeleteSecurityGroup(sgID string) error {
+	_, err := a.Client.DeleteSecurityGroup(context.Background(), &ec2.DeleteSecurityGroupInput{
+		GroupId: aws.String(sgID),
+	})
+	return err
 }
 
 // GuessSSHUser returns a likely default SSH user based on the platform string.
