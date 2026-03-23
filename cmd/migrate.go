@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/J0sh0909/rift/internal"
 	"github.com/spf13/cobra"
@@ -17,8 +19,9 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	migrateFromFlag string
-	migrateToFlag   string
+	migrateFromFlag   string
+	migrateToFlag     string
+	migrateFolderFlag string
 )
 
 // ---------------------------------------------------------------------------
@@ -173,12 +176,11 @@ func nicDevVBoxToVMware(vboxNicType string) string {
 // ---------------------------------------------------------------------------
 
 var migrateCmd = &cobra.Command{
-	Use:   "migrate <vm-name>",
+	Use:   "migrate [vm-name]",
 	Short: "Migrate a VM between hypervisors",
-	Long:  "Supported: --from vmware --to vbox, --from vbox --to vmware",
-	Args:  cobra.ExactArgs(1),
+	Long:  "Supported: --from vmware --to vbox, --from vbox --to vmware.\nUse --folder to migrate all VMs in a VMware folder (or all VBox VMs).",
+	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		vmName := args[0]
 		from := strings.ToLower(migrateFromFlag)
 		to := strings.ToLower(migrateToFlag)
 
@@ -191,6 +193,17 @@ var migrateCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		if migrateFolderFlag == "" && len(args) == 0 {
+			fmt.Fprintln(os.Stderr, "error: provide a VM name or --folder")
+			os.Exit(1)
+		}
+
+		if migrateFolderFlag != "" {
+			migrateFolderBatch(from, to)
+			return
+		}
+
+		vmName := args[0]
 		switch {
 		case from == "vmware" && to == "vbox":
 			migrateVMwareToVBox(vmName)
@@ -201,6 +214,254 @@ var migrateCmd = &cobra.Command{
 			os.Exit(1)
 		}
 	},
+}
+
+// ---------------------------------------------------------------------------
+// Folder batch migration
+// ---------------------------------------------------------------------------
+
+type migrateResult struct {
+	name string
+	err  error
+}
+
+func migrateFolderBatch(from, to string) {
+	switch {
+	case from == "vmware" && to == "vbox":
+		migrateFolderVMwareToVBox()
+	case from == "vbox" && to == "vmware":
+		migrateFolderVBoxToVMware()
+	default:
+		fmt.Fprintf(os.Stderr, "error: unsupported migration path %s → %s\n", from, to)
+		os.Exit(1)
+	}
+}
+
+func migrateFolderVMwareToVBox() {
+	requireSettings()
+	vms, err := hv.GetPowerState()
+	if err != nil {
+		internal.LogError(internal.ErrSourceNotFound, "", "listing VMware VMs: %s", err)
+		os.Exit(1)
+	}
+	var targets []internal.VM
+	for _, vm := range vms {
+		if strings.EqualFold(vm.Folder, migrateFolderFlag) {
+			targets = append(targets, vm)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Fprintf(os.Stderr, "no VMs found in folder '%s'\n", migrateFolderFlag)
+		os.Exit(1)
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
+
+	var (
+		mu      sync.Mutex
+		results []migrateResult
+		wg      sync.WaitGroup
+	)
+	for _, vm := range targets {
+		wg.Add(1)
+		go func(vm internal.VM) {
+			defer wg.Done()
+			err := migrateOneVMwareToVBox(vm)
+			mu.Lock()
+			results = append(results, migrateResult{name: vm.Name, err: err})
+			mu.Unlock()
+		}(vm)
+	}
+	wg.Wait()
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	for _, r := range results {
+		if r.err != nil {
+			internal.LogError(internal.ErrMigration, r.name, "%s", r.err)
+		}
+	}
+}
+
+func migrateFolderVBoxToVMware() {
+	requireSettings()
+	vbox, err := internal.NewVBoxBackend()
+	if err != nil {
+		internal.LogError(internal.ErrSourceNotFound, "", "%s", err)
+		os.Exit(1)
+	}
+	vbVMs, err := vbox.ListVMs()
+	if err != nil {
+		internal.LogError(internal.ErrSourceNotFound, "", "listing VBox VMs: %s", err)
+		os.Exit(1)
+	}
+	if len(vbVMs) == 0 {
+		fmt.Fprintln(os.Stderr, "no VirtualBox VMs found")
+		os.Exit(1)
+	}
+	sort.Slice(vbVMs, func(i, j int) bool { return vbVMs[i].Name < vbVMs[j].Name })
+
+	var (
+		mu      sync.Mutex
+		results []migrateResult
+		wg      sync.WaitGroup
+	)
+	for _, vm := range vbVMs {
+		wg.Add(1)
+		go func(vm internal.VBoxVM) {
+			defer wg.Done()
+			err := migrateOneVBoxToVMware(vm.Name)
+			mu.Lock()
+			results = append(results, migrateResult{name: vm.Name, err: err})
+			mu.Unlock()
+		}(vm)
+	}
+	wg.Wait()
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+	for _, r := range results {
+		if r.err != nil {
+			internal.LogError(internal.ErrMigration, r.name, "%s", r.err)
+		}
+	}
+}
+
+// migrateOneVMwareToVBox migrates a single VMware VM to VBox. Returns nil on success.
+func migrateOneVMwareToVBox(sourceVM internal.VM) error {
+	if sourceVM.Running {
+		return fmt.Errorf("VM must be powered off before migration")
+	}
+
+	fmt.Printf("%s → converting disk...\n", sourceVM.Name)
+
+	specs, err := internal.ParseVMXSpecs(sourceVM.Path)
+	if err != nil {
+		return fmt.Errorf("reading specs: %s", err)
+	}
+	vmxData, err := internal.ParseVMXKeys(sourceVM.Path)
+	if err != nil {
+		return fmt.Errorf("reading VMX: %s", err)
+	}
+	guestOS := vmxData["guestos"]
+	cpus, _ := strconv.Atoi(specs.CPUCount)
+	if cpus < 1 {
+		cpus = 1
+	}
+	ramMB, _ := strconv.Atoi(specs.MemoryMB)
+	if ramMB < 512 {
+		ramMB = 512
+	}
+
+	disks, err := internal.ParseVMXDisks(sourceVM.Path)
+	if err != nil || len(disks) == 0 {
+		return fmt.Errorf("no disks found")
+	}
+	vmdkPath := disks[0].FileName
+	if !filepath.IsAbs(vmdkPath) {
+		vmdkPath = filepath.Join(filepath.Dir(sourceVM.Path), vmdkPath)
+	}
+
+	qemuImg, err := findQemuImg()
+	if err != nil {
+		return fmt.Errorf("%s", err)
+	}
+
+	vdiPath := filepath.Join(filepath.Dir(vmdkPath), sourceVM.Name+".vdi")
+	if err := convertDisk(qemuImg, vmdkPath, "vmdk", vdiPath, "vdi"); err != nil {
+		return fmt.Errorf("disk conversion: %s", err)
+	}
+
+	fmt.Printf("%s → creating VM...\n", sourceVM.Name)
+	vbox, err := internal.NewVBoxBackend()
+	if err != nil {
+		return fmt.Errorf("VBoxManage: %s", err)
+	}
+	vboxOS := vmwareToVBoxOS(guestOS)
+	if err := vbox.CreateVM(sourceVM.Name, vboxOS, cpus, ramMB); err != nil {
+		return fmt.Errorf("creating VM: %s", err)
+	}
+	if err := vbox.AddSATAController(sourceVM.Name, "SATA"); err != nil {
+		return fmt.Errorf("adding SATA controller: %s", err)
+	}
+	if err := vbox.AttachDisk(sourceVM.Name, vdiPath, "SATA"); err != nil {
+		return fmt.Errorf("attaching disk: %s", err)
+	}
+
+	nics, _ := internal.ParseVMXNetworking(sourceVM.Path, nil)
+	for _, nic := range nics {
+		vboxConn := nicConnVMwareToVBox(nic.Type)
+		vboxDev := nicDevVMwareToVBox(nic.VirtualDev)
+		idx := "1"
+		if nic.Index != "" {
+			n, _ := strconv.Atoi(nic.Index)
+			idx = strconv.Itoa(n + 1)
+		}
+		exec.Command(vbox.VBoxManagePath(), "modifyvm", sourceVM.Name,
+			"--nic"+idx, vboxConn,
+			"--nictype"+idx, vboxDev).Run()
+	}
+
+	fmt.Printf("%s → migrated to VirtualBox\n", sourceVM.Name)
+	return nil
+}
+
+// migrateOneVBoxToVMware migrates a single VBox VM to VMware. Returns nil on success.
+func migrateOneVBoxToVMware(vmName string) error {
+	vbox, err := internal.NewVBoxBackend()
+	if err != nil {
+		return fmt.Errorf("%s", err)
+	}
+	info, err := vbox.GetVMInfo(vmName)
+	if err != nil {
+		return fmt.Errorf("%s", err)
+	}
+	if info.State == "running" {
+		return fmt.Errorf("VM must be powered off before migration")
+	}
+
+	fmt.Printf("%s → converting disk...\n", vmName)
+
+	if len(info.Disks) == 0 {
+		return fmt.Errorf("no disks found")
+	}
+
+	qemuImg, err := findQemuImg()
+	if err != nil {
+		return fmt.Errorf("%s", err)
+	}
+
+	destDir := filepath.Join(settings.VmDirectory, vmName)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("creating directory: %s", err)
+	}
+
+	srcDisk := info.Disks[0]
+	srcFmt := "vdi"
+	if strings.HasSuffix(srcDisk, ".vmdk") {
+		srcFmt = "vmdk"
+	} else if strings.HasSuffix(srcDisk, ".vhd") {
+		srcFmt = "vpc"
+	}
+	vmdkPath := filepath.Join(destDir, vmName+".vmdk")
+	if err := convertDisk(qemuImg, srcDisk, srcFmt, vmdkPath, "vmdk"); err != nil {
+		return fmt.Errorf("disk conversion: %s", err)
+	}
+
+	fmt.Printf("%s → creating VM...\n", vmName)
+	vmxPath := filepath.Join(destDir, vmName+".vmx")
+	guestOS := vboxToVMwareOS(info.OSType)
+	cpus := info.CPUs
+	if cpus < 1 {
+		cpus = 1
+	}
+	ramMB := info.MemoryMB
+	if ramMB < 512 {
+		ramMB = 512
+	}
+
+	vmxContent := generateVMX(vmName, guestOS, cpus, ramMB, vmName+".vmdk", info.NICs)
+	if err := os.WriteFile(vmxPath, []byte(vmxContent), 0644); err != nil {
+		return fmt.Errorf("writing VMX: %s", err)
+	}
+
+	fmt.Printf("%s → migrated to VMware Workstation\n", vmName)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -410,8 +671,8 @@ func migrateVBoxToVMware(vmName string) {
 func generateVMX(name, guestOS string, cpus, ramMB int, vmdkFile string, nics []internal.VBoxNIC) string {
 	var b strings.Builder
 	b.WriteString(".encoding = \"UTF-8\"\n")
-	b.WriteString(fmt.Sprintf("config.version = \"8\"\n"))
-	b.WriteString(fmt.Sprintf("virtualHW.version = \"21\"\n"))
+	b.WriteString("config.version = \"8\"\n")
+	b.WriteString("virtualHW.version = \"21\"\n")
 	b.WriteString(fmt.Sprintf("displayName = \"%s\"\n", name))
 	b.WriteString(fmt.Sprintf("guestOS = \"%s\"\n", guestOS))
 	b.WriteString(fmt.Sprintf("numvcpus = \"%d\"\n", cpus))
@@ -424,7 +685,7 @@ func generateVMX(name, guestOS string, cpus, ramMB int, vmdkFile string, nics []
 
 	// SATA controller + disk.
 	b.WriteString("sata0.present = \"TRUE\"\n")
-	b.WriteString(fmt.Sprintf("sata0:0.present = \"TRUE\"\n"))
+	b.WriteString("sata0:0.present = \"TRUE\"\n")
 	b.WriteString(fmt.Sprintf("sata0:0.fileName = \"%s\"\n", vmdkFile))
 
 	// NICs.
@@ -465,4 +726,5 @@ func init() {
 	rootCmd.AddCommand(migrateCmd)
 	migrateCmd.Flags().StringVar(&migrateFromFlag, "from", "", "Source hypervisor (vmware, vbox)")
 	migrateCmd.Flags().StringVar(&migrateToFlag, "to", "", "Target hypervisor (vmware, vbox)")
+	migrateCmd.Flags().StringVar(&migrateFolderFlag, "folder", "", "Migrate all VMs in a VMware folder (or all VBox VMs)")
 }

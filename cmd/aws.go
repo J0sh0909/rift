@@ -6,7 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/J0sh0909/rift/internal"
@@ -27,6 +30,7 @@ var (
 	awsRegionFlag string
 	awsUserFlag   string
 	awsKeyFlag    string
+	awsCountFlag  int
 )
 
 // ---------------------------------------------------------------------------
@@ -112,7 +116,11 @@ func saveState(s RiftState) error {
 	return os.WriteFile(statePath(), data, 0644)
 }
 
+var stateMu sync.Mutex
+
 func stateAddInstance(ri RiftInstance) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	s := loadState()
 	s.Instances = append(s.Instances, ri)
 	if err := saveState(s); err != nil {
@@ -121,6 +129,8 @@ func stateAddInstance(ri RiftInstance) {
 }
 
 func stateRemoveInstance(instanceID string) RiftInstance {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	s := loadState()
 	var removed RiftInstance
 	var kept []RiftInstance
@@ -268,7 +278,7 @@ var awsStopCmd = &cobra.Command{
 
 var awsCreateCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Launch a new EC2 instance",
+	Short: "Launch a new EC2 instance (or N instances with --count)",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		requireAWS()
@@ -327,6 +337,12 @@ var awsCreateCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
+		// Batch mode: --count N.
+		if awsCountFlag > 1 {
+			awsCreateBatch(instType, keyName, pemPath, sgID, subnetID)
+			return
+		}
+
 		// 4. Launch instance.
 		fmt.Printf("launching %s (%s)...\n", awsNameFlag, instType)
 		instanceID, err := awsBackend.CreateInstance(awsAMIFlag, awsNameFlag, instType, keyName, sgID, subnetID)
@@ -377,6 +393,103 @@ var awsCreateCmd = &cobra.Command{
 			fmt.Printf("ssh:       ssh -i %s %s@%s\n", pemPath, user, publicIP)
 		}
 	},
+}
+
+// ---------------------------------------------------------------------------
+// Batch creation: rift aws create --count N
+// ---------------------------------------------------------------------------
+
+type awsCreateResult struct {
+	name       string
+	instanceID string
+	publicIP   string
+	err        error
+}
+
+func awsCreateBatch(instType, keyName, pemPath, sgID, subnetID string) {
+	count := awsCountFlag
+	names := make([]string, count)
+	for i := range names {
+		names[i] = awsNameFlag + "-" + strconv.Itoa(i+1)
+	}
+
+	var (
+		mu      sync.Mutex
+		results []awsCreateResult
+		wg      sync.WaitGroup
+	)
+
+	for _, name := range names {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			r := awsCreateOne(name, instType, keyName, sgID, subnetID)
+			mu.Lock()
+			results = append(results, r)
+			mu.Unlock()
+		}(name)
+	}
+	wg.Wait()
+
+	sort.Slice(results, func(i, j int) bool { return results[i].name < results[j].name })
+
+	// Print summary table.
+	fmt.Println()
+	fmt.Printf("%-20s %-22s %-16s %s\n", "NAME", "INSTANCE ID", "PUBLIC IP", "STATUS")
+	fmt.Println(strings.Repeat("-", 72))
+	for _, r := range results {
+		if r.err != nil {
+			fmt.Printf("%-20s %-22s %-16s %s\n", r.name, "-", "-", "FAILED: "+r.err.Error())
+		} else {
+			pub := r.publicIP
+			if pub == "" {
+				pub = "-"
+			}
+			fmt.Printf("%-20s %-22s %-16s %s\n", r.name, r.instanceID, pub, "ok")
+		}
+	}
+	fmt.Printf("\nkey file: %s\n", pemPath)
+}
+
+func awsCreateOne(name, instType, keyName, sgID, subnetID string) awsCreateResult {
+	fmt.Printf("launching %s (%s)...\n", name, instType)
+	instanceID, err := awsBackend.CreateInstance(awsAMIFlag, name, instType, keyName, sgID, subnetID)
+	if err != nil {
+		return awsCreateResult{name: name, err: err}
+	}
+
+	if err := awsBackend.WaitUntilRunning(instanceID, 5*time.Minute); err != nil {
+		return awsCreateResult{name: name, instanceID: instanceID, err: fmt.Errorf("waiting for running: %s", err)}
+	}
+
+	var eipAllocID, publicIP string
+	ip, allocID, eipErr := awsBackend.AllocateAndAssociateEIP(instanceID)
+	if eipErr != nil {
+		fmt.Fprintf(os.Stderr, "%s: warning: elastic IP: %s\n", name, eipErr)
+	} else {
+		eipAllocID = allocID
+		publicIP = ip
+	}
+
+	if publicIP == "" {
+		if inst, err := awsBackend.GetInstance(instanceID); err == nil {
+			publicIP = inst.PublicIP
+		}
+	}
+
+	stateAddInstance(RiftInstance{
+		InstanceID:      instanceID,
+		Name:            name,
+		KeyPairName:     keyName,
+		SecurityGroupID: sgID,
+		EIPAllocationID: eipAllocID,
+		SubnetID:        subnetID,
+		AMI:             awsAMIFlag,
+		InstanceType:    instType,
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+	})
+
+	return awsCreateResult{name: name, instanceID: instanceID, publicIP: publicIP}
 }
 
 // ---------------------------------------------------------------------------
@@ -595,6 +708,7 @@ func init() {
 	awsCreateCmd.Flags().StringVar(&awsNameFlag, "name", "", "Instance name (required)")
 	awsCreateCmd.Flags().StringVar(&awsTypeFlag, "type", "t2.micro", "Instance type")
 	awsCreateCmd.Flags().StringVar(&awsKeyFlag, "key", "", "Reuse existing AWS key pair by name")
+	awsCreateCmd.Flags().IntVar(&awsCountFlag, "count", 0, "Create N instances with sequential names (<name>-1, <name>-2, ...)")
 	awsCmd.PersistentFlags().StringVar(&awsRegionFlag, "region", "", "AWS region (overrides AWS_REGION from .env)")
 	awsSSHCmd.Flags().StringVarP(&awsUserFlag, "user", "u", "", "SSH username (default: auto-detect from AMI)")
 }
