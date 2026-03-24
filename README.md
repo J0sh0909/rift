@@ -26,11 +26,11 @@ A cross-hypervisor VM orchestration CLI built in Go.
 
 | Platform | Scope | Lifecycle | Snapshots | Exec | Config | Export | Migrate | SSH |
 |---|---|---|---|---|---|---|---|---|
-| VMware Workstation | `rift <cmd>` | ✅ start, stop, suspend, reset | ✅ create, list, revert, delete | ✅ guest exec | ✅ cpu, ram, nic, disk, cdrom, display, os | ✅ ovf/ova | ✅ to/from vbox | — |
-| VirtualBox | `rift vbox <cmd>` | ✅ start, stop | ✅ take, list, restore, delete | — | — | — | ✅ to/from vmware | — |
-| AWS EC2 | `rift aws <cmd>` | ✅ start, stop, create, terminate | — | — | — | — | — | ✅ ssh, ip |
-| Hyper-V | detection only | — | — | — | — | — | — | — |
-| Proxmox VE | planned | — | — | — | — | — | — | — |
+| VMware Workstation | `rift <cmd>` | start, stop, suspend, reset | create, list, revert, delete | guest exec | cpu, ram, nic, disk, cdrom, display, os | ovf/ova | to/from vbox | - |
+| VirtualBox | `rift vbox <cmd>` | start, stop | take, list, restore, delete | - | - | - | to/from vmware | - |
+| AWS EC2 | `rift aws <cmd>` | start, stop, create, terminate | - | - | - | - | - | ssh, ip |
+| Hyper-V | detection only | - | - | - | - | - | - | - |
+| Proxmox VE | planned | - | - | - | - | - | - | - |
 
 ---
 
