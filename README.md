@@ -16,17 +16,21 @@ A cross-hypervisor VM orchestration CLI built in Go.
 - **Hardware configuration** -edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
 - **Structured error codes** -every failure prints a `[VMxxx]` code; `rift errors` lists all codes and descriptions
 - **GitHub Actions pipeline** -trigger any rift command against a self-hosted runner via `workflow_dispatch`
+- **AWS EC2 management** -create, start, stop, terminate, and SSH into EC2 instances; batch creation with `--count`; automatic key pair, security group, and Elastic IP provisioning; state tracking via `rift-state.json`
+- **VirtualBox management** -list, start, stop, snapshot, and delete VirtualBox VMs via `rift vbox`; Hyper-V detection for multi-hypervisor hosts
 - **Cross-platform host support** -compiles and runs on both Windows and Linux hosts; host resource detection, VMware process management, and ovftool lookup all adapt automatically to the host OS
 
 ---
 
-## Supported Hypervisors
+## Supported Platforms
 
-| Hypervisor | `HYPERVISOR` value | Status |
-|---|---|---|
-| VMware Workstation | `workstation` | Implemented |
-| VirtualBox | `vbox` | Migration target |
-| Proxmox VE | `proxmox` | Planned |
+| Platform | Scope | Lifecycle | Snapshots | Exec | Config | Export | Migrate | SSH |
+|---|---|---|---|---|---|---|---|---|
+| VMware Workstation | `rift <cmd>` | ✅ start, stop, suspend, reset | ✅ create, list, revert, delete | ✅ guest exec | ✅ cpu, ram, nic, disk, cdrom, display, os | ✅ ovf/ova | ✅ to/from vbox | — |
+| VirtualBox | `rift vbox <cmd>` | ✅ start, stop | ✅ take, list, restore, delete | — | — | — | ✅ to/from vmware | — |
+| AWS EC2 | `rift aws <cmd>` | ✅ start, stop, create, terminate | — | — | — | — | — | ✅ ssh, ip |
+| Hyper-V | detection only | — | — | — | — | — | — | — |
+| Proxmox VE | planned | — | — | — | — | — | — | — |
 
 ---
 
@@ -35,7 +39,8 @@ A cross-hypervisor VM orchestration CLI built in Go.
 - Go 1.23+
 - VMware Workstation with `vmrun`, `vmware-vdiskmanager`, and `ovftool` available (`.exe` on Windows, no extension on Linux)
 - `qemu-img` on `PATH` (or set `QEMU_IMG_PATH` in `.env`) -required for `rift migrate` disk conversions
-- VirtualBox with `VBoxManage` on `PATH` -required for migration to/from VirtualBox
+- VirtualBox with `VBoxManage` on `PATH` -required for `rift vbox` and migration to/from VirtualBox
+- AWS credentials configured (`~/.aws/credentials` or environment variables) -required for `rift aws` EC2 commands
 - Guest credentials for `exec` -use any existing account or provision a dedicated one with the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (recommended)
 
 ---
@@ -111,6 +116,8 @@ QEMU_IMG_PATH=C:\Program Files\qemu\qemu-img.exe
 VM_DEFAULT_USER=runner
 VM_DEFAULT_PASS=PASSWORD
 HYPERVISOR=workstation
+AWS_REGION=us-east-1
+AWS_KEY_DIR=C:\Users\USER\.ssh
 ```
 
 **Linux**
@@ -126,6 +133,8 @@ QEMU_IMG_PATH=/usr/bin/qemu-img
 VM_DEFAULT_USER=runner
 VM_DEFAULT_PASS=PASSWORD
 HYPERVISOR=workstation
+AWS_REGION=us-east-1
+AWS_KEY_DIR=/home/USER/.ssh
 ```
 
 Build:
@@ -143,9 +152,9 @@ go install .
 
 ---
 
-## Usage (VMware Workstation)
+## Usage
 
-> The commands below are specific to the VMware Workstation backend. When additional backends are implemented, the same command surface works identically -the `Hypervisor` interface abstracts all backend differences, so only the `.env` configuration changes.
+### VMware Workstation
 
 ```
 # List all VMs grouped by folder
@@ -214,6 +223,43 @@ rift config cdrom unmount MyVM --controller sata0
 
 # Error code reference
 rift errors
+```
+
+### VirtualBox
+
+```
+rift vbox list
+rift vbox start MyVM
+rift vbox stop MyVM --hard
+rift vbox info MyVM
+rift vbox snapshot take MyVM --name pre-upgrade
+rift vbox snapshot list MyVM
+rift vbox snapshot restore MyVM pre-upgrade
+rift vbox snapshot delete MyVM pre-upgrade
+rift vbox delete MyVM -y
+```
+
+### AWS EC2
+
+```
+# List instances
+rift aws list
+rift aws list --all
+
+# Lifecycle
+rift aws start i-0abc123
+rift aws stop i-0abc123
+rift aws create --ami ami-0abc123 --name my-server --type t3.micro
+rift aws create --ami ami-0abc123 --name batch --count 5
+rift aws terminate i-0abc123
+rift aws destroy -y
+
+# Connectivity
+rift aws ssh i-0abc123
+rift aws ip i-0abc123
+
+# State tracking
+rift aws state
 ```
 
 ### Running via GitHub Actions
