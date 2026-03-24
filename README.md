@@ -11,6 +11,7 @@ A cross-hypervisor VM orchestration CLI built in Go.
 - **Guest exec with OS auto-detection** -run commands inside VMs; interpreter is inferred from the VMX `guestOS` key (Linux -> `/bin/bash`, Windows -> `cmd.exe`)
 - **Bootstrap provisioning** -provision the `runner` automation user on guest VMs in one command; downloads and runs the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script automatically over VMware guest tools
 - **Snapshot management** -create (with duplicate detection), list, revert, and delete snapshots; running VMs are suspended automatically before capture
+- **Cross-hypervisor migration** -migrate VMs between VMware Workstation and VirtualBox with `rift migrate`; disk conversion via `qemu-img` with per-VM mpb progress bars; single VM or batch folder migration with parallel execution
 - **OVF/OVA archive pipeline** -export and import VMs via `ovftool` with per-VM mpb progress bars; versioned directory layout under `ARCHIVE_PATH`
 - **Hardware configuration** -edit CPU, RAM, NIC, disk, CD/DVD, and display settings with host-resource validation
 - **Structured error codes** -every failure prints a `[VMxxx]` code; `rift errors` lists all codes and descriptions
@@ -24,6 +25,7 @@ A cross-hypervisor VM orchestration CLI built in Go.
 | Hypervisor | `HYPERVISOR` value | Status |
 |---|---|---|
 | VMware Workstation | `workstation` | Implemented |
+| VirtualBox | `vbox` | Migration target |
 | Proxmox VE | `proxmox` | Planned |
 
 ---
@@ -32,6 +34,8 @@ A cross-hypervisor VM orchestration CLI built in Go.
 
 - Go 1.23+
 - VMware Workstation with `vmrun`, `vmware-vdiskmanager`, and `ovftool` available (`.exe` on Windows, no extension on Linux)
+- `qemu-img` on `PATH` (or set `QEMU_IMG_PATH` in `.env`) -required for `rift migrate` disk conversions
+- VirtualBox with `VBoxManage` on `PATH` -required for migration to/from VirtualBox
 - Guest credentials for `exec` -use any existing account or provision a dedicated one with the [bootstrap-utilities](https://github.com/J0sh0909/bootstrap-utilities) script (recommended)
 
 ---
@@ -103,6 +107,7 @@ NETMAP_PATH=C:\ProgramData\VMware\netmap.conf
 ISO_DIRECTORY=C:\Users\USER\Documents\ISO
 VDISK_PATH=C:\Program Files (x86)\VMware\VMware Workstation\vmware-vdiskmanager.exe
 ARCHIVE_PATH=C:\Users\USER\Documents\vm-storage
+QEMU_IMG_PATH=C:\Program Files\qemu\qemu-img.exe
 VM_DEFAULT_USER=runner
 VM_DEFAULT_PASS=PASSWORD
 HYPERVISOR=workstation
@@ -117,6 +122,7 @@ NETMAP_PATH=/etc/vmware/netmap.conf
 ISO_DIRECTORY=/home/USER/iso
 VDISK_PATH=/usr/bin/vmware-vdiskmanager
 ARCHIVE_PATH=/home/USER/vm-storage
+QEMU_IMG_PATH=/usr/bin/qemu-img
 VM_DEFAULT_USER=runner
 VM_DEFAULT_PASS=PASSWORD
 HYPERVISOR=workstation
@@ -181,6 +187,12 @@ rift archive list
 rift archive import MyVM-20260101-120000
 rift archive import MyVM --latest --format ova
 rift archive delete MyVM --oldest -y
+
+# Cross-hypervisor migration
+rift migrate MyVM --from vmware --to vbox
+rift migrate MyVM --from vbox --to vmware
+rift migrate --folder MyFolder --from vmware --to vbox
+rift migrate --folder MyFolder --from vbox --to vmware
 
 # Hardware config
 rift config cpu MyVM --sockets 1 --cores 4
@@ -247,7 +259,6 @@ To use: go to **Actions -> rift -> Run workflow**, enter a rift command (e.g. `s
 
 - Proxmox VE backend
 - VM creation from YAML manifest
-- Cross-hypervisor VM migration
 - TUI dashboard
 
 ---
