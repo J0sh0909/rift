@@ -1,12 +1,11 @@
 name: rift
-
 on:
   push:
     branches: [dev]
   workflow_dispatch:
     inputs:
       command:
-        description: 'rift command'
+        description: 'rift command (e.g. overview, list, start MyVM)'
         required: true
         type: string
 
