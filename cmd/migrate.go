@@ -231,16 +231,16 @@ var migrateCmd = &cobra.Command{
 
 		if from == "" || to == "" {
 			fmt.Fprintln(os.Stderr, "error: --from and --to are required")
-			os.Exit(1)
+			exit(1)
 		}
 		if from == to {
 			fmt.Fprintln(os.Stderr, "error: --from and --to must be different")
-			os.Exit(1)
+			exit(1)
 		}
 
 		if migrateFolderFlag == "" && len(args) == 0 {
 			fmt.Fprintln(os.Stderr, "error: provide a VM name or --folder")
-			os.Exit(1)
+			exit(1)
 		}
 
 		if migrateFolderFlag != "" {
@@ -256,9 +256,17 @@ var migrateCmd = &cobra.Command{
 			migrateVBoxToVMware(vmName)
 		default:
 			fmt.Fprintf(os.Stderr, "error: unsupported migration path %s → %s\n", from, to)
-			os.Exit(1)
+			exit(1)
 		}
 	},
+}
+
+// workstationBackend returns the VMware Workstation backend regardless of
+// HYPERVISOR, since migration names its source and target explicitly.
+func workstationBackend() core.Hypervisor {
+	h, err := core.CreateBackend("workstation", loadSettings())
+	exitOnErr(err)
+	return h
 }
 
 // ---------------------------------------------------------------------------
@@ -278,16 +286,15 @@ func migrateFolderBatch(from, to string) {
 		migrateFolderVBoxToVMware()
 	default:
 		fmt.Fprintf(os.Stderr, "error: unsupported migration path %s → %s\n", from, to)
-		os.Exit(1)
+		exit(1)
 	}
 }
 
 func migrateFolderVMwareToVBox() {
-	requireSettings()
-	vms, err := hv.GetPowerState()
+	vms, err := workstationBackend().GetPowerState()
 	if err != nil {
 		core.LogError(core.ErrSourceNotFound, "", "listing VMware VMs: %s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	var targets []core.VM
 	for _, vm := range vms {
@@ -297,7 +304,7 @@ func migrateFolderVMwareToVBox() {
 	}
 	if len(targets) == 0 {
 		fmt.Fprintf(os.Stderr, "no VMs found in folder '%s'\n", migrateFolderFlag)
-		os.Exit(1)
+		exit(1)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 
@@ -336,6 +343,7 @@ func migrateFolderVMwareToVBox() {
 	for _, r := range results {
 		if r.err != nil {
 			core.LogError(core.ErrMigration, r.name, "%s", r.err)
+			failures++
 		} else {
 			fmt.Printf("%s → migrated to VirtualBox\n", r.name)
 		}
@@ -343,20 +351,20 @@ func migrateFolderVMwareToVBox() {
 }
 
 func migrateFolderVBoxToVMware() {
-	requireSettings()
-	vbox, err := vbox.NewVBoxBackend()
+	loadSettings()
+	vbox, err := newVBox()
 	if err != nil {
 		core.LogError(core.ErrSourceNotFound, "", "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	vbVMs, err := vbox.ListVMs()
 	if err != nil {
 		core.LogError(core.ErrSourceNotFound, "", "listing VBox VMs: %s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	if len(vbVMs) == 0 {
 		fmt.Fprintln(os.Stderr, "no VirtualBox VMs found")
-		os.Exit(1)
+		exit(1)
 	}
 	sort.Slice(vbVMs, func(i, j int) bool { return vbVMs[i].Name < vbVMs[j].Name })
 
@@ -395,6 +403,7 @@ func migrateFolderVBoxToVMware() {
 	for _, r := range results {
 		if r.err != nil {
 			core.LogError(core.ErrMigration, r.name, "%s", r.err)
+			failures++
 		} else {
 			fmt.Printf("%s → migrated to VMware Workstation\n", r.name)
 		}
@@ -445,7 +454,7 @@ func migrateOneVMwareToVBox(sourceVM core.VM, bar *mpb.Bar) error {
 		return fmt.Errorf("disk conversion: %s", err)
 	}
 
-	vbox, err := vbox.NewVBoxBackend()
+	vbox, err := newVBox()
 	if err != nil {
 		return fmt.Errorf("VBoxManage: %s", err)
 	}
@@ -480,7 +489,7 @@ func migrateOneVMwareToVBox(sourceVM core.VM, bar *mpb.Bar) error {
 // migrateOneVBoxToVMware migrates a single VBox VM to VMware. Returns nil on success.
 // The provided mpb bar is updated with disk conversion progress.
 func migrateOneVBoxToVMware(vmName string, bar *mpb.Bar) error {
-	vbox, err := vbox.NewVBoxBackend()
+	vbox, err := newVBox()
 	if err != nil {
 		return fmt.Errorf("%s", err)
 	}
@@ -542,13 +551,11 @@ func migrateOneVBoxToVMware(vmName string, bar *mpb.Bar) error {
 // ---------------------------------------------------------------------------
 
 func migrateVMwareToVBox(vmName string) {
-	requireSettings()
-
 	// 1. Find the VMware VM.
-	vms, err := hv.GetPowerState()
+	vms, err := workstationBackend().GetPowerState()
 	if err != nil {
 		core.LogError(core.ErrSourceNotFound, vmName, "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	var sourceVM core.VM
 	found := false
@@ -561,11 +568,11 @@ func migrateVMwareToVBox(vmName string) {
 	}
 	if !found {
 		core.LogError(core.ErrSourceNotFound, vmName, "VM not found in VMware inventory")
-		os.Exit(1)
+		exit(1)
 	}
 	if sourceVM.Running {
 		fmt.Fprintf(os.Stderr, "error: VM must be powered off before migration\n")
-		os.Exit(1)
+		exit(1)
 	}
 
 	p := mpb.New()
@@ -583,7 +590,7 @@ func migrateVMwareToVBox(vmName string) {
 	if err := migrateOneVMwareToVBox(sourceVM, bar); err != nil {
 		p.Wait()
 		core.LogError(core.ErrMigration, vmName, "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	p.Wait()
 	fmt.Printf("%s → creating VM...\n", vmName)
@@ -595,22 +602,22 @@ func migrateVMwareToVBox(vmName string) {
 // ---------------------------------------------------------------------------
 
 func migrateVBoxToVMware(vmName string) {
-	requireSettings()
+	loadSettings()
 
 	// 1. Get VBox VM info.
-	vbox, err := vbox.NewVBoxBackend()
+	vbox, err := newVBox()
 	if err != nil {
 		core.LogError(core.ErrSourceNotFound, vmName, "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	info, err := vbox.GetVMInfo(vmName)
 	if err != nil {
 		core.LogError(core.ErrSourceNotFound, vmName, "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	if info.State == "running" {
 		fmt.Fprintf(os.Stderr, "error: VM must be powered off before migration\n")
-		os.Exit(1)
+		exit(1)
 	}
 
 	p := mpb.New()
@@ -628,7 +635,7 @@ func migrateVBoxToVMware(vmName string) {
 	if err := migrateOneVBoxToVMware(vmName, bar); err != nil {
 		p.Wait()
 		core.LogError(core.ErrMigration, vmName, "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
 	p.Wait()
 	fmt.Printf("%s → creating VM...\n", vmName)

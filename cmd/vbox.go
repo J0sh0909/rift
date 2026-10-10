@@ -30,11 +30,18 @@ func requireVBox() {
 		return
 	}
 	var err error
-	vboxBackend, err = vbox.NewVBoxBackend()
+	vboxBackend, err = newVBox()
 	if err != nil {
 		core.LogError(core.ErrConfig, "", "%s", err)
-		os.Exit(1)
+		exit(1)
 	}
+}
+
+// newVBox opens VirtualBox using VBOX_MANAGE_PATH from .env when set
+// (VBoxManage is often not on PATH on Windows), else PATH.
+func newVBox() (*vbox.VBoxBackend, error) {
+	_, _ = core.LoadSettings() // loads .env into the environment; .env is optional here
+	return vbox.NewVBoxBackend(os.Getenv("VBOX_MANAGE_PATH"))
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +66,7 @@ var vboxListCmd = &cobra.Command{
 		vms, err := vboxBackend.ListVMs()
 		if err != nil {
 			core.LogError(core.ErrConfig, "", "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		if len(vms) == 0 {
 			fmt.Println("No VirtualBox VMs found.")
@@ -85,7 +92,7 @@ var vboxStartCmd = &cobra.Command{
 		requireVBox()
 		if err := vboxBackend.DirectStartVM(args[0]); err != nil {
 			core.LogError(core.ErrStartFailed, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("%s → started\n", args[0])
 	},
@@ -103,7 +110,7 @@ var vboxStopCmd = &cobra.Command{
 		requireVBox()
 		if err := vboxBackend.DirectStopVM(args[0], vboxHardFlag); err != nil {
 			core.LogError(core.ErrStopFailed, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("%s → stopped\n", args[0])
 	},
@@ -122,7 +129,7 @@ var vboxInfoCmd = &cobra.Command{
 		info, err := vboxBackend.GetVMInfo(args[0])
 		if err != nil {
 			core.LogError(core.ErrConfig, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("Name:     %s\n", info.Name)
 		fmt.Printf("UUID:     %s\n", info.UUID)
@@ -162,7 +169,7 @@ var vboxSnapCreateCmd = &cobra.Command{
 		requireVBox()
 		if err := vboxBackend.SnapshotCreate(args[0], args[1]); err != nil {
 			core.LogError(core.ErrSnapCreate, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("%s → snapshot '%s' created\n", args[0], args[1])
 	},
@@ -177,7 +184,7 @@ var vboxSnapListCmd = &cobra.Command{
 		snaps, err := vboxBackend.SnapshotList(args[0])
 		if err != nil {
 			core.LogError(core.ErrSnapshot, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		if len(snaps) == 0 {
 			fmt.Printf("%s → no snapshots\n", args[0])
@@ -197,7 +204,7 @@ var vboxSnapRevertCmd = &cobra.Command{
 		requireVBox()
 		if err := vboxBackend.SnapshotRevert(args[0], args[1]); err != nil {
 			core.LogError(core.ErrSnapRevert, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("%s → reverted to '%s'\n", args[0], args[1])
 	},
@@ -211,7 +218,7 @@ var vboxSnapDeleteCmd = &cobra.Command{
 		requireVBox()
 		if err := vboxBackend.SnapshotDelete(args[0], args[1]); err != nil {
 			core.LogError(core.ErrSnapDelete, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("%s → snapshot '%s' deleted\n", args[0], args[1])
 	},
@@ -229,11 +236,11 @@ var vboxDeleteCmd = &cobra.Command{
 		requireVBox()
 		if !vboxYesFlag {
 			fmt.Fprintf(os.Stderr, "error: --yes is required to confirm deletion\n")
-			os.Exit(1)
+			exit(1)
 		}
 		if err := vboxBackend.DeleteVM(args[0]); err != nil {
 			core.LogError(core.ErrConfig, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		fmt.Printf("%s → deleted\n", args[0])
 	},
