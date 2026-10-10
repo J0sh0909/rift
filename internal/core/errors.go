@@ -41,6 +41,7 @@ const (
 	ErrNotRunning       = "VM305"
 	ErrBootstrapLinux   = "VM306"
 	ErrBootstrapWindows = "VM307"
+	ErrGuestNoIP        = "VM308"
 
 	// VM4xx - snapshot operations
 	ErrSnapshot     = "VM400"
@@ -62,6 +63,9 @@ const (
 	ErrMissingSetting = "VM601"
 	ErrInvalidPath    = "VM602"
 	ErrVmrunNotFound  = "VM603"
+	ErrUnsupported    = "VM604"
+	ErrNotFound       = "VM605"
+	ErrAmbiguous      = "VM606"
 
 	// VM7xx - file/VMX operations
 	ErrVMXRead        = "VM700"
@@ -125,6 +129,7 @@ var ErrorCodes = []ErrorRef{
 	{ErrNotRunning, "VM is not running (exec requires running VM)"},
 	{ErrBootstrapLinux, "bootstrap Linux operation failed"},
 	{ErrBootstrapWindows, "bootstrap Windows operation failed"},
+	{ErrGuestNoIP, "guest IP not reported (tools / guest additions / integration services not running)"},
 
 	{ErrSnapshot, "generic snapshot operation error"},
 	{ErrSnapCreate, "snapshot create failed"},
@@ -143,6 +148,9 @@ var ErrorCodes = []ErrorRef{
 	{ErrMissingSetting, "missing required setting"},
 	{ErrInvalidPath, "invalid path"},
 	{ErrVmrunNotFound, "vmrun not found"},
+	{ErrUnsupported, "operation not supported by this hypervisor backend"},
+	{ErrNotFound, "VM or folder not found on this node"},
+	{ErrAmbiguous, "VM name exists on several backends - use --hv"},
 
 	{ErrVMXRead, "VMX read failed"},
 	{ErrVMXWrite, "VMX write failed"},
@@ -156,6 +164,7 @@ var ErrorCodes = []ErrorRef{
 	{ErrAWSStartFailed, "EC2 start failed"},
 	{ErrAWSStopFailed, "EC2 stop failed"},
 	{ErrAWSTermFailed, "EC2 terminate failed"},
+	{ErrHypervisorInit, "hypervisor backend failed to initialize or list VMs"},
 
 	{ErrMigration, "generic migration error"},
 	{ErrDiskConvertMig, "disk conversion failed"},

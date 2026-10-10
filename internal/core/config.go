@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -39,9 +40,13 @@ type Settings struct {
 	ProxmoxTokenID     string
 	ProxmoxTokenSecret string
 
-	// DetectedHypervisors is populated by NewHypervisor auto-detection.
-	// Each entry is a backend name: "workstation", "vbox", "hyperv".
-	DetectedHypervisors []string
+	// Node / pipeline
+	NodeName    string // RIFT_NODE: display name of this node (default: hostname)
+	MaxParallel int    // RIFT_MAX_PARALLEL: per-backend concurrency cap (0 = default)
+
+	// Guest SSH (used for Hyper-V Linux guests)
+	SSHPort       int    // VM_SSH_PORT (default 22)
+	SSHKnownHosts string // VM_SSH_KNOWN_HOSTS (default ~/.rift/known_hosts)
 }
 
 // HostResources holds detected host hardware limits
@@ -90,7 +95,12 @@ func LoadSettings() (Settings, error) {
 		ProxmoxUser:        os.Getenv("PROXMOX_USER"),
 		ProxmoxTokenID:     os.Getenv("PROXMOX_TOKEN_ID"),
 		ProxmoxTokenSecret: os.Getenv("PROXMOX_TOKEN_SECRET"),
+
+		NodeName:      os.Getenv("RIFT_NODE"),
+		SSHKnownHosts: os.Getenv("VM_SSH_KNOWN_HOSTS"),
 	}
+	s.MaxParallel, _ = strconv.Atoi(os.Getenv("RIFT_MAX_PARALLEL"))
+	s.SSHPort, _ = strconv.Atoi(os.Getenv("VM_SSH_PORT"))
 
 	// Multi-hypervisor: don't error on empty hypervisor-specific fields.
 	// Only error if absolutely nothing is configured.
@@ -118,6 +128,17 @@ func LoadSettings() (Settings, error) {
 	}
 
 	return s, nil
+}
+
+// Node returns the display name of this node: RIFT_NODE, else the hostname.
+func (s Settings) Node() string {
+	if s.NodeName != "" {
+		return s.NodeName
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "local"
 }
 
 // GBtoMB converts GB to MB (for VMX memsize)

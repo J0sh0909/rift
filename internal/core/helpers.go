@@ -10,12 +10,25 @@ import (
 	"strings"
 )
 
+// VM is a virtual machine as reported by a hypervisor backend.
 type VM struct {
-	Name    string
-	Path    string
+	Name string
+	// Path is the backend's handle for the VM: the .vmx path (VMware), the
+	// UUID (VirtualBox) or the VM name (Hyper-V).
+	Path string
+	// Folder is the logical folder: the VMware inventory folder, the
+	// VirtualBox group, or the Hyper-V VM group / "rift-folder:" Notes tag.
 	Folder  string
 	Running bool
+	// Backend is the registered backend name; set by LoadInventory.
+	Backend string
+	// OS is the guest OS identifier when the backend reports it cheaply
+	// (VirtualBox ostype, Hyper-V "rift-os:" Notes tag). Empty otherwise.
+	OS string
 }
+
+// UngroupedFolder is the folder reported for VMs that are not in a folder.
+const UngroupedFolder = "Ungrouped"
 
 type NIC struct {
 	Index      string
@@ -80,88 +93,6 @@ var RequiresPowerOff = map[string]bool{
 	"tpm":          true,
 	"revert":       true,
 	"export":       true,
-}
-
-// ---------------------------------------------------------------------------
-// Target Resolution - eliminates repeated LoadSettings/GetPowerState/filter
-// ---------------------------------------------------------------------------
-
-// ResolveTargets gets power state via hv and resolves VM targets
-// from either a folder flag or a list of VM names. Returns targets
-// and any error. Prints "not found" messages for missing VMs.
-func ResolveTargets(hv Hypervisor, folderFlag string, args []string) ([]VM, error) {
-	vms, err := hv.GetPowerState()
-	if err != nil {
-		return nil, err
-	}
-
-	var targets []VM
-
-	if folderFlag != "" {
-		for _, v := range vms {
-			if strings.EqualFold(v.Folder, folderFlag) {
-				targets = append(targets, v)
-			}
-		}
-		if len(targets) == 0 {
-			return nil, fmt.Errorf("no VMs found in folder '%s'", folderFlag)
-		}
-	} else {
-		for _, name := range args {
-			found := false
-			for _, v := range vms {
-				if strings.EqualFold(v.Name, name) {
-					targets = append(targets, v)
-					found = true
-					break
-				}
-			}
-			if !found {
-				fmt.Printf("VM '%s' not found\n", name)
-			}
-		}
-	}
-
-	return targets, nil
-}
-
-// ResolveAllVMs gets all VMs via hv (for info with no args).
-func ResolveAllVMs(hv Hypervisor, folderFlag string, args []string) ([]VM, error) {
-	vms, err := hv.GetPowerState()
-	if err != nil {
-		return nil, err
-	}
-
-	var targets []VM
-
-	if folderFlag != "" {
-		for _, v := range vms {
-			if strings.EqualFold(v.Folder, folderFlag) {
-				targets = append(targets, v)
-			}
-		}
-		if len(targets) == 0 {
-			return nil, fmt.Errorf("no VMs found in folder '%s'", folderFlag)
-		}
-	} else if len(args) > 0 {
-		for _, name := range args {
-			found := false
-			for _, v := range vms {
-				if strings.EqualFold(v.Name, name) {
-					targets = append(targets, v)
-					found = true
-					break
-				}
-			}
-			if !found {
-				fmt.Printf("VM '%s' not found\n", name)
-			}
-		}
-	} else {
-		targets = vms
-	}
-
-	return targets, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +196,7 @@ func DefaultInterpreter(guestOS string) (string, bool) {
 		{"opensuse", "/bin/bash"},
 		{"opnsense", "/bin/sh"},
 		{"mikrotik", "/bin/sh"},
+		{"mandriva", "/bin/bash"},
 		// 7
 		{"windows", `C:\Windows\System32\cmd.exe`},
 		{"freebsd", "/bin/sh"},
@@ -299,6 +231,8 @@ func DefaultInterpreter(guestOS string) (string, bool) {
 		{"dd-wrt", "/bin/sh"},
 		{"unraid", "/bin/bash"},
 		{"xcp-ng", "/bin/bash"},
+		{"redhat", "/bin/bash"}, // VirtualBox ostype RedHat_64
+		{"oracle", "/bin/bash"}, // VirtualBox ostype Oracle_64
 		// 5
 		{"zorin", "/bin/bash"},
 		{"rocky", "/bin/bash"},
@@ -474,30 +408,6 @@ func ParseVMXSpecs(vmxPath string) (VMSpecs, error) {
 		PerfCounters:   perfCounters,
 		MemoryMB:       memoryMB,
 	}, nil
-}
-
-// ---------------------------------------------------------------------------
-// VM Discovery & Power State
-// ---------------------------------------------------------------------------
-
-func DiscoverVMs(vmDirectory string) ([]VM, error) {
-	var vms []VM
-	err := filepath.Walk(vmDirectory, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() && filepath.Ext(path) == ".vmx" {
-			vmName := strings.TrimSuffix(info.Name(), ".vmx")
-			relPath, _ := filepath.Rel(vmDirectory, path)
-			folder := filepath.Dir(relPath)
-			vms = append(vms, VM{Name: vmName, Path: path, Folder: folder})
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("scanning VM directory: %w", err)
-	}
-	return vms, nil
 }
 
 // ---------------------------------------------------------------------------

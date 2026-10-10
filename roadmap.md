@@ -66,7 +66,19 @@ Manual dispatch runs on all three machines simultaneously
 Three-node infrastructure: Omen (VMware), Pavilion (VBox), AI (Hyper-V)
 
 
-v1.5.0 — Hyper-V CLI Backend
+v1.4.1 — Node-Wide Folders and Pipeline Fan-Out (DONE)
+
+Folder targeting spans every hypervisor on a node: VMware folders, VirtualBox groups, Hyper-V VM groups / "rift-folder:" notes
+Name targeting across hypervisors, ambiguity detection, --hv to pick, HYPERVISOR as tie-breaker
+Shared execution engine: per-hypervisor concurrency caps, retries for transient failures only, exit 1 on failures
+Guest exec on VirtualBox (guestcontrol) and Hyper-V (PowerShell Direct / SSH with TOFU host keys)
+rift ip: guest IPs from VMware Tools, Guest Additions, Hyper-V integration services
+rift dispatch: injection-safe pipeline entry point, missing folders are notices, results in the run summary
+Workflow: node matrix, node selection input, PR verification on hosted runner, versioned binaries, timeouts
+Fixes: power-off gate for VMX edits, Linux bootstrap sudo/quoting, vmrun password redaction, VBOX_MANAGE_PATH
+
+
+v1.5.0 — Hyper-V CLI Backend (mostly done in v1.4.1; VM creation remaining)
 
 Full Hypervisor interface implementation wrapping PowerShell cmdlets
 Get-VM → list with state, CPU, RAM

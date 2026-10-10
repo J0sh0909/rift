@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -84,9 +85,22 @@ func wsVmrun(vmrunPath string, args ...string) (string, error) {
 	cmd := exec.Command(vmrunPath, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("vmrun %v failed: %w\nOutput: %s", args, err, output)
+		return "", fmt.Errorf("vmrun %v failed: %w\nOutput: %s", redactArgs(args), err, output)
 	}
 	return string(output), nil
+}
+
+// redactArgs masks password values (-gp guest password, -vp encryption
+// password) so vmrun errors don't leak secrets to stderr or LOG_PATH.
+func redactArgs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == "-gp" || out[i] == "-vp" {
+			out[i+1] = "***"
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -134,15 +148,28 @@ func wsParseInventory(inventoryPath string) ([]core.VM, error) {
 		}
 	}
 
+	// Walk entries in vmlist index order so output and first-match name
+	// resolution are stable (map iteration order is random).
+	nums := make([]string, 0, len(entries))
+	for num := range entries {
+		nums = append(nums, num)
+	}
+	sort.Slice(nums, func(i, j int) bool {
+		a, _ := strconv.Atoi(nums[i])
+		b, _ := strconv.Atoi(nums[j])
+		return a < b
+	})
+
 	var vms []core.VM
-	for _, entry := range entries {
+	for _, num := range nums {
+		entry := entries[num]
 		config := entry["config"]
 		if !strings.HasSuffix(config, ".vmx") {
 			continue
 		}
 		folderName := folders[entry["ParentID"]]
 		if folderName == "" {
-			folderName = "Ungrouped"
+			folderName = core.UngroupedFolder
 		}
 		vms = append(vms, core.VM{
 			Name:   entry["DisplayName"],
@@ -178,16 +205,24 @@ func (w *WorkstationBackend) GetPowerState() ([]core.VM, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing running VMs: %w", err)
 	}
+	running := make(map[string]bool, len(runningVMs))
+	for _, p := range runningVMs {
+		running[normalizeVMXPath(p)] = true
+	}
 	for i := range vms {
-		vms[i].Running = false
-		for _, runningVM := range runningVMs {
-			if strings.TrimSpace(vms[i].Path) == strings.TrimSpace(runningVM) {
-				vms[i].Running = true
-				break
-			}
-		}
+		vms[i].Running = running[normalizeVMXPath(vms[i].Path)]
 	}
 	return vms, nil
+}
+
+// normalizeVMXPath makes inventory and "vmrun list" paths comparable. Windows
+// paths are case-insensitive and the two sources don't always agree on case.
+func normalizeVMXPath(p string) string {
+	p = strings.TrimSpace(p)
+	if runtime.GOOS == "windows" {
+		p = strings.ToLower(p)
+	}
+	return p
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 package core
 
-// Test commit to trigger CI after adding new file.
 import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/vbauerster/mpb/v8"
 )
@@ -61,110 +61,75 @@ func RegisterBackend(name string, factory HypervisorFactory) {
 	backendFactories[name] = factory
 }
 
-// NewHypervisor creates a Hypervisor from settings, with auto-detection.
+// backendLabels maps registered backend names to display names.
+var backendLabels = map[string]string{
+	"workstation": "VMware Workstation",
+	"vbox":        "VirtualBox",
+	"hyperv":      "Hyper-V",
+	"proxmox":     "Proxmox",
+}
+
+// BackendLabel returns the human-readable name of a backend.
+func BackendLabel(name string) string {
+	if label, ok := backendLabels[name]; ok {
+		return label
+	}
+	return name
+}
+
+// NewHypervisor creates a single Hypervisor from settings, with auto-detection.
 // If hvFlag is non-empty, it overrides both the .env HYPERVISOR and auto-detection.
+// Commands that act on targets use LoadInventory instead, which spans every
+// backend on the node; NewHypervisor remains for single-backend operations.
 func NewHypervisor(s Settings, hvFlag string) (Hypervisor, error) {
-	// Step 1: determine which backend to use
 	backend := s.Hypervisor
 	if hvFlag != "" {
 		backend = hvFlag
 	}
-
-	// Step 2: if explicitly set, use that backend directly
 	if backend != "" {
-		factory, ok := backendFactories[backend]
-		if !ok {
-			return nil, fmt.Errorf("unknown hypervisor backend %q", backend)
-		}
-		return factory(s)
+		return CreateBackend(backend, s)
 	}
 
-	// Step 3: auto-detect installed hypervisors
-	var detected []string
-
-	// VMware: VMRUN_PATH is set and the file exists
-	if s.VmrunPath != "" {
-		if _, err := os.Stat(s.VmrunPath); err == nil {
-			detected = append(detected, "workstation")
-		}
-	}
-
-	// VirtualBox: VBOX_MANAGE_PATH is set and exists, OR VBoxManage is in PATH
-	if s.VBoxManagePath != "" {
-		if _, err := os.Stat(s.VBoxManagePath); err == nil {
-			detected = append(detected, "vbox")
-		}
-	} else if _, err := exec.LookPath("VBoxManage"); err == nil {
-		detected = append(detected, "vbox")
-	}
-
-	// Hyper-V: only when explicitly enabled via HYPERV_ENABLED=true in .env
-	if s.HyperVEnabled {
-		detected = append(detected, "hyperv")
-	}
-
-	// Store detected hypervisors on settings for overview iteration
-	s.DetectedHypervisors = detected
-
+	detected := DetectHypervisors(s)
 	switch len(detected) {
 	case 0:
 		return nil, fmt.Errorf("no hypervisor configured - check .env")
 	case 1:
-		factory, ok := backendFactories[detected[0]]
-		if !ok {
-			return nil, fmt.Errorf("backend %q detected but not registered", detected[0])
+		return CreateBackend(detected[0], s)
+	}
+
+	// Several hypervisors are installed: use the only one that has VMs.
+	var withVMs []string
+	var chosen Hypervisor
+	for _, name := range detected {
+		h, err := CreateBackend(name, s)
+		if err != nil {
+			LogError(ErrHypervisorInit, name, "%s", err)
+			continue
 		}
-		return factory(s)
+		vms, err := h.GetPowerState()
+		if err != nil {
+			LogError(ErrHypervisorInit, name, "%s", err)
+			continue
+		}
+		if len(vms) > 0 {
+			withVMs = append(withVMs, name)
+			chosen = h
+		}
+	}
+	switch len(withVMs) {
+	case 0:
+		return nil, fmt.Errorf("multiple hypervisors detected (%s), but none have VMs configured - use --hv flag or set HYPERVISOR in .env", strings.Join(detected, ", "))
+	case 1:
+		LogInfo("Implicitly selected hypervisor", "%s (only one with VMs)", withVMs[0])
+		return chosen, nil
 	default:
-		// If multiple hypervisors are detected, try to find if only one has VMs.
-		// If so, use it implicitly. Otherwise, prompt the user to specify.
-		var vmsPerHypervisor = make(map[string][]VM)
-		for _, name := range detected {
-			factory, ok := backendFactories[name]
-			if !ok {
-				continue // Should not happen if detected correctly
-			}
-			hvInstance, err := factory(s)
-			if err != nil {
-				// Log the error but continue trying other backends
-				LogError(ErrHypervisorInit, name, "%s", err)
-				continue
-			}
-			vms, err := hvInstance.GetPowerState()
-			if err != nil {
-				// Log the error but continue trying other backends
-				LogError(ErrHypervisorInit, name, "%s", err)
-				continue
-			}
-			vmsPerHypervisor[name] = vms
-		}
-
-		var providersWithVMs []string
-		for name, vms := range vmsPerHypervisor {
-			if len(vms) > 0 {
-				providersWithVMs = append(providersWithVMs, name)
-			}
-		}
-
-		switch len(providersWithVMs) {
-		case 0:
-			return nil, fmt.Errorf("multiple hypervisors detected (%s), but none have VMs configured - use --hv flag or set HYPERVISOR in .env", joinNames(detected))
-		case 1:
-			provider := providersWithVMs[0]
-			factory, ok := backendFactories[provider]
-			if !ok {
-				return nil, fmt.Errorf("provider %q detected but not registered", provider) // Should not happen
-			}
-			LogInfo("Implicitly selected hypervisor", "%s (only one with VMs)", provider)
-			return factory(s)
-		default:
-			return nil, fmt.Errorf("multiple hypervisors detected (%s) with VMs configured - use --hv flag or set HYPERVISOR in .env", joinNames(providersWithVMs))
-		}
+		return nil, fmt.Errorf("multiple hypervisors detected (%s) with VMs configured - use --hv flag or set HYPERVISOR in .env", strings.Join(withVMs, ", "))
 	}
 }
 
-// DetectHypervisors returns the list of detected hypervisor backend names.
-// Used by overview to iterate all detected backends.
+// DetectHypervisors returns the names of the hypervisor backends installed on
+// this node, based on .env paths and PATH lookups.
 func DetectHypervisors(s Settings) []string {
 	var detected []string
 
@@ -190,6 +155,25 @@ func DetectHypervisors(s Settings) []string {
 	return detected
 }
 
+// NodeBackends returns the backends a node-wide command should span. An
+// explicit --hv narrows it to that backend; otherwise it is every detected
+// backend plus HYPERVISOR from .env, with HYPERVISOR first.
+func NodeBackends(s Settings, hvFlag string) []string {
+	if hvFlag != "" {
+		return []string{hvFlag}
+	}
+	var names []string
+	if s.Hypervisor != "" {
+		names = append(names, s.Hypervisor)
+	}
+	for _, d := range DetectHypervisors(s) {
+		if d != s.Hypervisor {
+			names = append(names, d)
+		}
+	}
+	return names
+}
+
 // CreateBackend creates a backend by name from settings without auto-detection.
 func CreateBackend(name string, s Settings) (Hypervisor, error) {
 	factory, ok := backendFactories[name]
@@ -197,15 +181,4 @@ func CreateBackend(name string, s Settings) (Hypervisor, error) {
 		return nil, fmt.Errorf("unknown hypervisor backend %q", name)
 	}
 	return factory(s)
-}
-
-func joinNames(names []string) string {
-	if len(names) == 0 {
-		return ""
-	}
-	result := names[0]
-	for _, n := range names[1:] {
-		result += ", " + n
-	}
-	return result
 }

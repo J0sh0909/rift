@@ -20,12 +20,12 @@ type WorkstationAPIBackend struct{}
 
 var errWSAPI = fmt.Errorf("vmware workstation API backend not implemented")
 
-func (w *WorkstationAPIBackend) GetPowerState() ([]core.VM, error)                { return nil, errWSAPI }
-func (w *WorkstationAPIBackend) EnsureVMwareRunning() error                        { return nil }
-func (w *WorkstationAPIBackend) StartVM(vmxPath string) error                      { return errWSAPI }
-func (w *WorkstationAPIBackend) StopVM(vmxPath string, mode ...string) error       { return errWSAPI }
-func (w *WorkstationAPIBackend) SuspendVM(vmxPath string) error                    { return errWSAPI }
-func (w *WorkstationAPIBackend) ResetVM(vmxPath string) error                      { return errWSAPI }
+func (w *WorkstationAPIBackend) GetPowerState() ([]core.VM, error)           { return nil, errWSAPI }
+func (w *WorkstationAPIBackend) EnsureVMwareRunning() error                  { return nil }
+func (w *WorkstationAPIBackend) StartVM(vmxPath string) error                { return errWSAPI }
+func (w *WorkstationAPIBackend) StopVM(vmxPath string, mode ...string) error { return errWSAPI }
+func (w *WorkstationAPIBackend) SuspendVM(vmxPath string) error              { return errWSAPI }
+func (w *WorkstationAPIBackend) ResetVM(vmxPath string) error                { return errWSAPI }
 
 func (w *WorkstationAPIBackend) RunGuestCommand(vmxPath, user, pass, interpreter, script, adminUser, adminPass string) (string, error) {
 	return "", errWSAPI
@@ -53,5 +53,7 @@ func (w *WorkstationAPIBackend) ExportVM(vmxPath, destPath string) error { retur
 func (w *WorkstationAPIBackend) ExportVMWithBar(vmxPath, destPath string, bar *mpb.Bar) error {
 	return errWSAPI
 }
-func (w *WorkstationAPIBackend) ImportVM(srcPath, destVmxPath string) error  { return errWSAPI }
-func (w *WorkstationAPIBackend) WarmEncryptionCache(_ []string)              {}
+func (w *WorkstationAPIBackend) ImportVM(srcPath, destVmxPath string) error { return errWSAPI }
+func (w *WorkstationAPIBackend) WarmEncryptionCache(_ []string)             {}
+
+var _ core.Hypervisor = (*WorkstationAPIBackend)(nil)

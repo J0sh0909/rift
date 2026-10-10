@@ -57,7 +57,7 @@ func requireAWS() {
 	awsBackend, err = aws.NewAWSBackend(region)
 	if err != nil {
 		core.LogError(core.ErrAWS, "", "initializing AWS: %s", err)
-		os.Exit(1)
+		exit(1)
 	}
 }
 
@@ -182,7 +182,7 @@ var awsListCmd = &cobra.Command{
 		instances, err := awsBackend.ListInstances(awsAllFlag)
 		if err != nil {
 			core.LogError(core.ErrAWS, "", "listing instances: %s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		if len(instances) == 0 {
 			fmt.Println("No instances found.")
@@ -222,7 +222,7 @@ var awsStartCmd = &cobra.Command{
 		requireAWS()
 		if err := awsBackend.StartInstances(args); err != nil {
 			core.LogError(core.ErrAWSStartFailed, "", "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		for _, id := range args {
 			fmt.Printf("%s → starting...\n", id)
@@ -258,7 +258,7 @@ var awsStopCmd = &cobra.Command{
 		requireAWS()
 		if err := awsBackend.StopInstances(args, awsHardFlag); err != nil {
 			core.LogError(core.ErrAWSStopFailed, "", "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		for _, id := range args {
 			fmt.Printf("%s → stopping...\n", id)
@@ -285,7 +285,7 @@ var awsCreateCmd = &cobra.Command{
 		requireAWS()
 		if awsAMIFlag == "" || awsNameFlag == "" {
 			fmt.Fprintln(os.Stderr, "error: --ami and --name are required")
-			os.Exit(1)
+			exit(1)
 		}
 		instType := awsTypeFlag
 		if instType == "" {
@@ -309,11 +309,11 @@ var awsCreateCmd = &cobra.Command{
 				pemData, err := awsBackend.CreateKeyPair(keyName)
 				if err != nil {
 					core.LogError(core.ErrAWSCreateFailed, "", "creating key pair: %s", err)
-					os.Exit(1)
+					exit(1)
 				}
 				if err := os.WriteFile(pemPath, []byte(pemData), 0600); err != nil {
 					core.LogError(core.ErrAWSCreateFailed, "", "writing key file: %s", err)
-					os.Exit(1)
+					exit(1)
 				}
 				fmt.Printf("key pair → %s\n", pemPath)
 			}
@@ -323,19 +323,19 @@ var awsCreateCmd = &cobra.Command{
 		vpcID, err := awsBackend.GetDefaultVPC()
 		if err != nil {
 			core.LogError(core.ErrAWSCreateFailed, "", "finding default VPC: %s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		subnetID, err := awsBackend.GetFirstSubnet(vpcID)
 		if err != nil {
 			core.LogError(core.ErrAWSCreateFailed, "", "finding subnet: %s", err)
-			os.Exit(1)
+			exit(1)
 		}
 
 		// 3. Security group.
 		sgID, err := awsBackend.EnsureSecurityGroup(vpcID)
 		if err != nil {
 			core.LogError(core.ErrAWSCreateFailed, "", "security group: %s", err)
-			os.Exit(1)
+			exit(1)
 		}
 
 		// Batch mode: --count N.
@@ -349,13 +349,13 @@ var awsCreateCmd = &cobra.Command{
 		instanceID, err := awsBackend.CreateInstance(awsAMIFlag, awsNameFlag, instType, keyName, sgID, subnetID)
 		if err != nil {
 			core.LogError(core.ErrAWSCreateFailed, "", "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 
 		// 5. Wait for running.
 		if err := awsBackend.WaitUntilRunning(instanceID, 5*time.Minute); err != nil {
 			core.LogError(core.ErrAWSCreateFailed, instanceID, "waiting for running: %s", err)
-			os.Exit(1)
+			exit(1)
 		}
 
 		// 6. Elastic IP.
@@ -505,7 +505,7 @@ var awsTerminateCmd = &cobra.Command{
 		requireAWS()
 		if !awsYesFlag {
 			fmt.Fprintf(os.Stderr, "error: --yes is required to confirm termination\n")
-			os.Exit(1)
+			exit(1)
 		}
 		for _, id := range args {
 			awsTerminateOne(id)
@@ -558,7 +558,7 @@ var awsDestroyCmd = &cobra.Command{
 		requireAWS()
 		if !awsYesFlag {
 			fmt.Fprintf(os.Stderr, "error: --yes is required to confirm destruction\n")
-			os.Exit(1)
+			exit(1)
 		}
 		state := loadState()
 		if len(state.Instances) == 0 {
@@ -632,11 +632,11 @@ var awsSSHCmd = &cobra.Command{
 		inst, err := awsBackend.GetInstance(args[0])
 		if err != nil {
 			core.LogError(core.ErrAWSNotFound, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		if inst.PublicIP == "" {
 			fmt.Fprintln(os.Stderr, "error: instance has no public IP")
-			os.Exit(1)
+			exit(1)
 		}
 		user := awsUserFlag
 		if user == "" {
@@ -656,7 +656,7 @@ var awsSSHCmd = &cobra.Command{
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		if err := c.Run(); err != nil {
-			os.Exit(1)
+			exit(1)
 		}
 	},
 }
@@ -674,7 +674,7 @@ var awsIPCmd = &cobra.Command{
 		inst, err := awsBackend.GetInstance(args[0])
 		if err != nil {
 			core.LogError(core.ErrAWSNotFound, args[0], "%s", err)
-			os.Exit(1)
+			exit(1)
 		}
 		pub := inst.PublicIP
 		if pub == "" {
