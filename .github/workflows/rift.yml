@@ -1,100 +1,164 @@
 name: rift
+
+# push (main/dev)   -> build on "strong", install rift on every node
+# pull_request      -> verify on a GitHub-hosted runner (never on self-hosted
+#                      runners: this repo is public, so PRs from forks must
+#                      not run code on the lab machines)
+# workflow_dispatch -> run a rift command on every node (or a subset)
+#
+# Optional repository variables (Settings > Secrets and variables > Actions):
+#   RIFT_NODES            JSON list of runner labels   default ["strong","weak","tank"]
+#   RIFT_HOME             install directory on nodes   default C:\actions-runner
+#   RIFT_ENV_PATH         .env path on nodes           default C:/actions-runner/.env
+#   RIFT_COMMAND_TIMEOUT  minutes per node             default 180
+
 on:
   push:
-    branches: [dev]
+    branches: [main, dev]
+    paths-ignore: ['**.md', 'LICENSE', 'rift-state.json']
+  pull_request:
+    paths-ignore: ['**.md', 'LICENSE', 'rift-state.json']
   workflow_dispatch:
     inputs:
       command:
-        description: 'rift command (e.g. overview, list, start MyVM)'
+        description: 'rift command, e.g. "start -f DEV", "exec -f DEV ip a", "ip -f DEV", "overview"'
         required: true
         type: string
+      nodes:
+        description: 'Nodes: all, one runner label (e.g. tank), or a JSON list (e.g. ["strong","tank"])'
+        required: false
+        default: all
+        type: string
+
+permissions:
+  contents: read
+
+# A newer push or PR update cancels the run it supersedes; dispatches always run.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('rift-dispatch-{0}', github.run_id) || format('rift-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  RIFT_HOME: ${{ vars.RIFT_HOME || 'C:\actions-runner' }}
 
 jobs:
-  build:
-    if: github.event_name == 'push'
-    runs-on: [self-hosted, strong]
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test ./...
-      - name: Build Windows Binary
-        run: go build -o rift.exe .
-      - name: Build Linux Binary
+      - name: gofmt
         run: |
-          $env:GOOS="linux"
-          $env:GOARCH="amd64"
-          go build -o rift-linux .
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+      - name: vet (linux + windows)
+        run: |
+          go vet ./...
+          GOOS=windows go vet ./...
+      - name: test
+        run: go test -race ./...
+      - name: build
+        run: |
+          GOOS=windows go build -trimpath -o rift.exe .
+          GOOS=linux go build -trimpath -o rift-linux .
+
+  build:
+    if: github.event_name == 'push'
+    runs-on: [self-hosted, strong]
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: powershell
+    env:
+      RIFT_VERSION: ${{ github.ref_name }}-${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # Self-hosted: the runner's own Go build cache already persists
+          # between runs, so the Actions cache would only add upload time.
+          cache: false
+      - name: vet (windows)
+        run: go vet ./...
+      - name: vet (linux)
+        run: go vet ./...
+        env:
+          GOOS: linux
+      - name: test
+        run: go test ./...
+      - name: build rift.exe
+        run: go build -trimpath -ldflags "-s -w -X github.com/J0sh0909/rift/cmd.version=$env:RIFT_VERSION" -o rift.exe .
+        env:
+          GOOS: windows
+          GOARCH: amd64
+      - name: build rift-linux
+        run: go build -trimpath -ldflags "-s -w -X github.com/J0sh0909/rift/cmd.version=$env:RIFT_VERSION" -o rift-linux .
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: '0'
       - uses: actions/upload-artifact@v4
         with:
-          name: rift-binary
+          name: rift-binaries
           path: |
             rift.exe
             rift-linux
+          if-no-files-found: error
+          retention-days: 7
 
-  distribute-strong:
+  distribute:
     if: github.event_name == 'push'
     needs: build
-    runs-on: [self-hosted, strong]
+    name: install (${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ${{ fromJSON(vars.RIFT_NODES || '["strong","weak","tank"]') }}
+    runs-on: [self-hosted, '${{ matrix.node }}']
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: rift-binary
-      - run: |
-          copy rift.exe C:\actions-runner\rift.exe
-          copy rift-linux C:\actions-runner\rift-linux
+          name: rift-binaries
+      - name: install
+        shell: powershell
+        run: |
+          foreach ($f in 'rift.exe', 'rift-linux') {
+            $target = Join-Path $env:RIFT_HOME $f
+            if (Test-Path $target) {
+              # A running exe can't be overwritten on Windows, but it can be renamed.
+              Move-Item -Force $target "$target.old"
+            }
+            Copy-Item $f $target
+            Remove-Item -Force -ErrorAction SilentlyContinue "$target.old"
+          }
+          & (Join-Path $env:RIFT_HOME 'rift.exe') version
+          exit $LASTEXITCODE
 
-  distribute-weak:
-    if: github.event_name == 'push'
-    needs: build
-    runs-on: [self-hosted, weak]
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: rift-binary
-      - run: |
-          copy rift.exe C:\actions-runner\rift.exe
-          copy rift-linux C:\actions-runner\rift-linux
-
-  distribute-tank:
-    if: github.event_name == 'push'
-    needs: build
-    runs-on: [self-hosted, tank]
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: rift-binary
-      - run: |
-          copy rift.exe C:\actions-runner\rift.exe
-          copy rift-linux C:\actions-runner\rift-linux
-
-  command-strong:
+  command:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, strong]
+    name: rift @ ${{ matrix.node }}
+    strategy:
+      fail-fast: false # one node failing must not cancel the others
+      matrix:
+        node: ${{ fromJSON((inputs.nodes == 'all' || inputs.nodes == '') && (vars.RIFT_NODES || '["strong","weak","tank"]') || (startsWith(inputs.nodes, '[') && inputs.nodes || format('["{0}"]', inputs.nodes))) }}
+    runs-on: [self-hosted, '${{ matrix.node }}']
+    timeout-minutes: ${{ fromJSON(vars.RIFT_COMMAND_TIMEOUT || '180') }}
     env:
-      ENV_PATH: C:/actions-runner/.env
+      ENV_PATH: ${{ vars.RIFT_ENV_PATH || 'C:/actions-runner/.env' }}
+      # Keep VMware/VirtualBox processes started by rift alive after the job ends.
       RUNNER_TRACKING_ID: ""
+      # The command reaches rift through the environment, never through the
+      # script text, so the input can't inject shell code.
+      RIFT_COMMAND: ${{ inputs.command }}
     steps:
-      - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
-
-  command-weak:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, weak]
-    env:
-      ENV_PATH: C:/actions-runner/.env
-      RUNNER_TRACKING_ID: ""
-    steps:
-      - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
-
-  command-tank:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, tank]
-    env:
-      ENV_PATH: C:/actions-runner/.env
-      RUNNER_TRACKING_ID: ""
-    steps:
-      - run: C:\actions-runner\rift.exe ${{ github.event.inputs.command }}
+      - name: rift ${{ inputs.command }}
+        shell: powershell
+        run: |
+          & (Join-Path $env:RIFT_HOME 'rift.exe') dispatch --env RIFT_COMMAND
+          exit $LASTEXITCODE
