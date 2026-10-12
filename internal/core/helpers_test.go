@@ -226,6 +226,28 @@ func TestRemoveVMXKey(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ValidateRAM
+// ---------------------------------------------------------------------------
+
+func TestValidateRAM(t *testing.T) {
+	host := HostResources{TotalRAMGB: 16}
+	for _, mb := range []int{4, 492, 1340, 4096, 16384} {
+		if err := ValidateRAM(host, mb); err != nil {
+			t.Errorf("ValidateRAM(%d MB) unexpected error: %s", mb, err)
+		}
+	}
+	for _, mb := range []int{0, -4, 1341, 16388} {
+		if err := ValidateRAM(host, mb); err == nil {
+			t.Errorf("ValidateRAM(%d MB) should return error", mb)
+		}
+	}
+	// Unknown host capacity skips only the capacity check.
+	if err := ValidateRAM(HostResources{}, 65536); err != nil {
+		t.Errorf("ValidateRAM with unknown host capacity: %s", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // GBtoMB / MBtoKB
 // ---------------------------------------------------------------------------
 
