@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -107,12 +108,14 @@ var overviewCmd = &cobra.Command{
 	Short: "Show VMs across all detected hypervisors and AWS",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		// AWS may work without .env, so a settings error is reported but
-		// doesn't stop the AWS section.
+		// AWS may work without .env (AWS_REGION from the environment), so a
+		// settings error is reported but doesn't stop the AWS section.
 		s, settingsErr := core.LoadSettings()
+		region := s.AWSRegion
 		if settingsErr != nil {
-			fail(core.ErrConfig, "%s", settingsErr)
+			fail(core.SettingsErrorCode(settingsErr), "%s", settingsErr)
 			noteServiceAccount()
+			region = os.Getenv("AWS_REGION")
 		}
 
 		// AWS is a network call: run it alongside the local hypervisors.
@@ -121,11 +124,11 @@ var overviewCmd = &cobra.Command{
 			awsInsts []aws.EC2Instance
 			awsErr   error
 		)
-		if s.AWSRegion != "" {
+		if region != "" {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				backend, err := aws.NewAWSBackend(s.AWSRegion)
+				backend, err := aws.NewAWSBackend(region)
 				if err != nil {
 					awsErr = err
 					return
@@ -134,50 +137,49 @@ var overviewCmd = &cobra.Command{
 			}()
 		}
 
+		// No local backend configured is an AWS-only node, not an error.
 		var vms []core.Target
 		var backends []string
 		if names := core.NodeBackends(s, hvFlag); settingsErr == nil && len(names) > 0 {
 			inv, err := core.LoadInventory(s, names, "")
 			if err != nil {
-				fail(core.ErrHypervisorInit, "%s", err)
-				noteServiceAccount()
+				fail(core.ErrMissingSetting, "%s", err)
 			} else {
+				reportInventory(s, inv)
 				vms, backends = inv.All(), inv.Backends()
-				for _, w := range inv.Warnings() {
-					fail(core.ErrHypervisorInit, "%s", w)
-				}
-				noteInventoryProblems(inv)
 			}
 		}
 		wg.Wait()
 
+		// Every backend that listed is shown, empty or not, so the output
+		// says what was checked.
 		fmt.Printf("Node: %s\n\n", s.Node())
 		total := 0
 		for _, b := range backends {
-			var section []core.Target
-			for _, t := range vms {
-				if t.Backend == b {
-					section = append(section, t)
-				}
-			}
-			if len(section) == 0 {
-				continue
-			}
 			fmt.Println(core.BackendLabel(b))
 			fmt.Println(strings.Repeat("-", 52))
-			for _, t := range section {
+			n := 0
+			for _, t := range vms {
+				if t.Backend != b {
+					continue
+				}
 				state := "off"
 				if t.Running {
 					state = "running"
 				}
 				fmt.Printf("  %-30s %-12s %s\n", t.Name, t.Folder, state)
+				n++
 			}
-			total += len(section)
+			if n == 0 {
+				fmt.Println("  (no VMs)")
+			}
+			total += n
 			fmt.Println()
 		}
 
 		if awsErr != nil {
-			core.LogError(core.ErrAWS, "", "AWS: %s", awsErr)
+			fail(core.ErrAWS, "AWS: %s", awsErr)
+			noteServiceAccount() // shared credentials live in the user profile
 		}
 		if len(awsInsts) > 0 {
 			fmt.Println("AWS EC2")
@@ -187,15 +189,18 @@ var overviewCmd = &cobra.Command{
 				if name == "" {
 					name = i.ID
 				}
-				fmt.Printf("  %-30s %-12s %s\n", name, s.AWSRegion, i.State)
+				fmt.Printf("  %-30s %-12s %s\n", name, region, i.State)
 			}
 			total += len(awsInsts)
 			fmt.Println()
 		}
 
-		if total == 0 {
+		switch {
+		case total == 0 && failures > 0:
+			fmt.Println("No VMs listed - see the errors above.")
+		case total == 0:
 			fmt.Println("No VMs detected across any provider.")
-		} else {
+		default:
 			fmt.Printf("Total: %d VM(s)\n", total)
 		}
 	},

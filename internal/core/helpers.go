@@ -433,10 +433,12 @@ func ScanArchives(archivePath string) ([]ArchiveEntry, error) {
 		base := filepath.Join(archivePath, format)
 		if _, err := os.Stat(base); os.IsNotExist(err) {
 			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("reading %s archives: %w", format, err)
 		}
 		err := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return nil
+				return err
 			}
 			ext := strings.ToLower(filepath.Ext(path))
 			if format == "OVF" && !info.IsDir() && ext == ".ovf" {
@@ -485,7 +487,7 @@ func ScanArchives(archivePath string) ([]ArchiveEntry, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("scanning %s archives: %w", format, err)
+			return nil, fmt.Errorf("reading %s archives: %w", format, err)
 		}
 	}
 	return entries, nil

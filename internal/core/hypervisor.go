@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/vbauerster/mpb/v8"
@@ -156,22 +157,42 @@ func DetectHypervisors(s Settings) []string {
 }
 
 // NodeBackends returns the backends a node-wide command should span. An
-// explicit --hv narrows it to that backend; otherwise it is every detected
-// backend plus HYPERVISOR from .env, with HYPERVISOR first.
+// explicit --hv narrows it to that backend; otherwise it is HYPERVISOR from
+// .env followed by every configured backend (VirtualBox also when it is on
+// PATH). Unlike DetectHypervisors, a configured path that doesn't exist is
+// kept, so LoadInventory reports it instead of the backend vanishing.
 func NodeBackends(s Settings, hvFlag string) []string {
 	if hvFlag != "" {
 		return []string{hvFlag}
 	}
 	var names []string
-	if s.Hypervisor != "" {
-		names = append(names, s.Hypervisor)
-	}
-	for _, d := range DetectHypervisors(s) {
-		if d != s.Hypervisor {
-			names = append(names, d)
+	add := func(name string) {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
 		}
 	}
+	if s.Hypervisor != "" {
+		add(s.Hypervisor)
+	}
+	if s.VmrunPath != "" {
+		add("workstation")
+	}
+	if s.VBoxManagePath != "" {
+		add("vbox")
+	} else if _, err := exec.LookPath("VBoxManage"); err == nil {
+		add("vbox")
+	}
+	if s.HyperVEnabled {
+		add("hyperv")
+	}
 	return names
+}
+
+// AutoDetectedBackend reports whether NodeBackends included name only
+// because it was found on PATH (VirtualBox) - nothing in .env or --hv asked
+// for it, so its failures are warnings rather than errors.
+func AutoDetectedBackend(s Settings, hvFlag, name string) bool {
+	return name == "vbox" && hvFlag == "" && s.Hypervisor != "vbox" && s.VBoxManagePath == ""
 }
 
 // CreateBackend creates a backend by name from settings without auto-detection.

@@ -1,7 +1,9 @@
 package core
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -28,10 +30,21 @@ type Inventory struct {
 	preferred string
 }
 
+// BackendError is a backend that could not be opened or listed.
+type BackendError struct {
+	Backend string
+	Err     error
+}
+
+func (e BackendError) Error() string {
+	return BackendLabel(e.Backend) + ": " + e.Err.Error()
+}
+
 // LoadInventory opens the named backends and lists their VMs in parallel.
-// A backend that fails to open or list is recorded as a warning; an error is
-// returned only when none of them could be listed. preferred names the
-// backend that wins when a VM name exists on several backends (may be empty).
+// A backend that fails to open or list is recorded (see Failures) and the
+// others are still listed, even when every backend failed; an error is
+// returned only when no backend is named. preferred names the backend that
+// wins when a VM name exists on several backends (may be empty).
 func LoadInventory(s Settings, names []string, preferred string) (*Inventory, error) {
 	if len(names) == 0 {
 		return nil, fmt.Errorf("no hypervisor configured - check .env")
@@ -44,6 +57,9 @@ func LoadInventory(s Settings, names []string, preferred string) (*Inventory, er
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if b.err = checkBackendPath(b.name, s); b.err != nil {
+				return
+			}
 			b.hv, b.err = CreateBackend(b.name, s)
 			if b.err != nil {
 				return
@@ -63,15 +79,28 @@ func LoadInventory(s Settings, names []string, preferred string) (*Inventory, er
 		}()
 	}
 	wg.Wait()
+	return inv, nil
+}
 
-	var failures []string
-	for _, b := range inv.backends {
-		if b.err == nil {
-			return inv, nil
+// checkBackendPath checks the executable .env configures for a backend, so a
+// wrong path is reported as such rather than as a failed command.
+func checkBackendPath(name string, s Settings) error {
+	switch name {
+	case "workstation":
+		if s.VmrunPath == "" {
+			return errors.New("VMRUN_PATH is not set in .env")
 		}
-		failures = append(failures, fmt.Sprintf("%s: %s", b.name, b.err))
+		if _, err := os.Stat(s.VmrunPath); err != nil {
+			return fmt.Errorf("VMRUN_PATH: %w", err)
+		}
+	case "vbox":
+		if s.VBoxManagePath != "" {
+			if _, err := os.Stat(s.VBoxManagePath); err != nil {
+				return fmt.Errorf("VBOX_MANAGE_PATH: %w", err)
+			}
+		}
 	}
-	return nil, fmt.Errorf("no hypervisor backend could list VMs (%s)", strings.Join(failures, "; "))
+	return nil
 }
 
 // Backends returns the names of the backends that listed successfully.
@@ -85,12 +114,12 @@ func (inv *Inventory) Backends() []string {
 	return names
 }
 
-// Warnings returns one message per backend that could not be listed.
-func (inv *Inventory) Warnings() []string {
-	var out []string
+// Failures returns the backends that could not be listed, in inventory order.
+func (inv *Inventory) Failures() []BackendError {
+	var out []BackendError
 	for _, b := range inv.backends {
 		if b.err != nil {
-			out = append(out, fmt.Sprintf("skipping %s: %s", BackendLabel(b.name), b.err))
+			out = append(out, BackendError{Backend: b.name, Err: b.err})
 		}
 	}
 	return out

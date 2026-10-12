@@ -91,7 +91,7 @@ func loadSettings() core.Settings {
 		}
 	})
 	if settingsErr != nil {
-		fail(core.ErrConfig, "%s", settingsErr)
+		fail(core.SettingsErrorCode(settingsErr), "%s", settingsErr)
 		noteServiceAccount()
 		exit(1)
 	}

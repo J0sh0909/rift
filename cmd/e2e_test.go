@@ -20,6 +20,9 @@ import (
 func TestMain(m *testing.M) {
 	if os.Getenv("RIFT_TEST_CLI") == "1" {
 		retryBackoff = 0
+		if sid := os.Getenv("RIFT_TEST_SID"); sid != "" {
+			currentSID = func() string { return sid } // pretend to be a Windows service account
+		}
 		Execute()
 		finish()
 		os.Exit(0)
@@ -172,6 +175,18 @@ vmlist7.ParentID = "f-test"
 	}
 	write(l.env, env, 0o644)
 	return l
+}
+
+// dropEnv removes the lines that set key from the lab's .env.
+func (l *lab) dropEnv(t *testing.T, key string) {
+	t.Helper()
+	var keep []string
+	for _, line := range strings.SplitAfter(mustRead(t, l.env), "\n") {
+		if !strings.HasPrefix(line, key+"=") {
+			keep = append(keep, line)
+		}
+	}
+	must(t, os.WriteFile(l.env, []byte(strings.Join(keep, "")), 0o644))
 }
 
 func must(t *testing.T, err error) {
@@ -447,6 +462,14 @@ func TestE2EUnreachableArchivePathDoesNotBreakCommands(t *testing.T) {
 		t.Fatalf("list should not depend on ARCHIVE_PATH: exit %d\n%s%s", code, out, errOut)
 	}
 	expect(t, "list", out, "web-1 [ON]")
+
+	// Commands that read the archive report it instead of finding nothing.
+	out, errOut, code = l.rift(t, nil, "archive", "list")
+	if code != 1 {
+		t.Errorf("archive list with an unreadable ARCHIVE_PATH should exit 1, got %d", code)
+	}
+	expect(t, "archive list stderr", errOut, "[VM500]", "reading OVF archives")
+	reject(t, "archive list stdout", out, "No archives found")
 }
 
 // Regression: overview printed "No VMs detected" and exited 0 when settings
@@ -459,14 +482,104 @@ func TestE2EOverviewReportsErrors(t *testing.T) {
 	if code != 1 {
 		t.Errorf("a failing backend should make overview exit 1, got %d", code)
 	}
-	expect(t, "stderr", errOut, "skipping VMware Workstation", "vmrun is broken")
-	expect(t, "stdout", out, "VirtualBox", "vb-dev-7")
+	expect(t, "stderr", errOut, "[VM899] VMware Workstation: ", "vmrun is broken")
+	expect(t, "stdout", out, "VirtualBox", "vb-dev-7", "Total: 3 VM(s)")
 
 	_, errOut, code = l.rift(t, []string{"ENV_PATH=" + filepath.Join(l.dir, "missing.env")}, "overview")
 	if code != 1 {
 		t.Errorf("a missing .env should make overview exit 1, got %d", code)
 	}
-	expect(t, "stderr", errOut, "loading .env")
+	expect(t, "stderr", errOut, "[VM600] loading .env")
+}
+
+// Regression: a VMRUN_PATH that doesn't exist made VMware silently drop out
+// of the node ("No VMs detected", exit 0). It must be reported.
+func TestE2EConfiguredBackendMissing(t *testing.T) {
+	l := newLab(t)
+	must(t, os.Remove(filepath.Join(l.dir, "vmrun")))
+	for _, cmd := range []string{"overview", "list"} {
+		out, errOut, code := l.rift(t, nil, cmd)
+		if code != 1 {
+			t.Errorf("%s: a missing VMRUN_PATH should exit 1, got %d", cmd, code)
+		}
+		expect(t, cmd+" stderr", errOut, "[VM899] VMware Workstation: VMRUN_PATH: ")
+		expect(t, cmd+" stdout", out, "vb-dev-7")
+		if cmd == "overview" {
+			expect(t, "overview stdout", out, "VirtualBox\n---")
+		}
+	}
+}
+
+// emptyVBoxNode is a VirtualBox-only node whose VirtualBox lists no VMs -
+// what a service account sees, since VirtualBox registers VMs per user.
+func emptyVBoxNode(t *testing.T) *lab {
+	t.Helper()
+	l := newLab(t)
+	l.dropEnv(t, "VMRUN_PATH")
+	must(t, os.WriteFile(filepath.Join(l.state, "vbox-vms"), nil, 0o644))
+	return l
+}
+
+func TestE2EServiceAccountSeesNoVBoxVMs(t *testing.T) {
+	l := emptyVBoxNode(t)
+	sid := []string{"RIFT_TEST_SID=S-1-5-20"}
+	out, errOut, code := l.rift(t, sid, "overview")
+	if code != 1 {
+		t.Errorf("overview: exit %d, want 1", code)
+	}
+	expect(t, "overview stderr", errOut, "VirtualBox lists no VMs", `NT AUTHORITY\NETWORK SERVICE`, "services.msc")
+	reject(t, "overview stderr", errOut, "WORKGROUP")
+	expect(t, "overview stdout", out, "(no VMs)", "No VMs listed - see the errors above.")
+	reject(t, "overview stdout", out, "No VMs detected")
+
+	if _, errOut, code := l.rift(t, sid, "list"); code != 1 {
+		t.Errorf("list: exit %d, want 1\n%s", code, errOut)
+	}
+
+	summary := filepath.Join(l.dir, "summary.md")
+	if _, errOut, code := l.rift(t, append(sid, "GITHUB_STEP_SUMMARY="+summary), "dispatch", "start -f DEV"); code != 1 {
+		t.Errorf("dispatch start -f DEV: exit %d, want 1\n%s", code, errOut)
+	}
+	expect(t, "summary", mustRead(t, summary), "VirtualBox lists no VMs", `**note:** rift is running as NT AUTHORITY\NETWORK SERVICE`)
+}
+
+// SYSTEM can read profiles and manage Hyper-V, but still has its own
+// VirtualBox registry.
+func TestE2ESystemAccountSeesNoVBoxVMs(t *testing.T) {
+	l := emptyVBoxNode(t)
+	_, errOut, code := l.rift(t, []string{"RIFT_TEST_SID=S-1-5-18"}, "overview")
+	if code != 1 {
+		t.Errorf("overview: exit %d, want 1", code)
+	}
+	expect(t, "stderr", errOut, "VirtualBox lists no VMs", `note: rift is running as NT AUTHORITY\SYSTEM`)
+	reject(t, "stderr", errOut, "Hyper-V")
+}
+
+// For a regular user an empty VirtualBox is just an empty VirtualBox.
+func TestE2EEmptyVBoxIsFineForUsers(t *testing.T) {
+	l := emptyVBoxNode(t)
+	out, errOut, code := l.rift(t, nil, "overview")
+	if code != 0 {
+		t.Errorf("overview: exit %d, want 0\n%s", code, errOut)
+	}
+	expect(t, "stdout", out, "VirtualBox\n---", "(no VMs)", "No VMs detected across any provider.")
+}
+
+// VirtualBox found only on PATH was not asked for: if it's broken that's a
+// warning, not a failed run.
+func TestE2EBrokenVBoxOnPathIsWarning(t *testing.T) {
+	l := newLab(t)
+	l.dropEnv(t, "VBOX_MANAGE_PATH")
+	bin := filepath.Join(l.dir, "bin")
+	must(t, os.MkdirAll(bin, 0o755))
+	must(t, os.WriteFile(filepath.Join(bin, "VBoxManage"), []byte("#!/bin/sh\necho 'VBoxManage: error: E_ACCESSDENIED' >&2\nexit 1\n"), 0o755))
+	out, errOut, code := l.rift(t, []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}, "list")
+	if code != 0 {
+		t.Errorf("list: exit %d, want 0\n%s", code, errOut)
+	}
+	expect(t, "stderr", errOut, "warning: skipping VirtualBox: ", "E_ACCESSDENIED")
+	reject(t, "stderr", errOut, "[VM899]")
+	expect(t, "stdout", out, "web-1 [ON]", "db-1 [ON]")
 }
 
 // The GitHub runner pre-loads <runner dir>\.env verbatim, so a quoted value

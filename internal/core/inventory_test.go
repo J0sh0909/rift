@@ -2,6 +2,9 @@ package core
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -158,22 +161,88 @@ func TestInventory_PartialFailure(t *testing.T) {
 	if got := inv.Backends(); !reflect.DeepEqual(got, []string{"ok"}) {
 		t.Errorf("Backends = %v", got)
 	}
-	w := strings.Join(inv.Warnings(), "\n")
-	if !strings.Contains(w, "vmrun exploded") || !strings.Contains(w, "not installed") {
-		t.Errorf("warnings = %q", w)
+	var failed []string
+	for _, f := range inv.Failures() {
+		failed = append(failed, f.Backend)
+	}
+	if !reflect.DeepEqual(failed, []string{"broken", "absent"}) {
+		t.Errorf("Failures = %v", inv.Failures())
+	}
+	if w := fmt.Sprint(inv.Failures()); !strings.Contains(w, "vmrun exploded") || !strings.Contains(w, "not installed") {
+		t.Errorf("failures = %q", w)
 	}
 	if _, ok := inv.Backend("broken"); ok {
 		t.Error("failed backend should not be returned")
 	}
 }
 
+// Every backend failing still yields an inventory, so each failure can be
+// reported on its own; only naming no backend at all is an error.
 func TestInventory_AllFail(t *testing.T) {
 	registerFake(t, "broken", &fakeHV{err: errors.New("boom")}, nil)
-	if _, err := LoadInventory(Settings{}, []string{"broken"}, ""); err == nil {
-		t.Fatal("expected error when every backend fails")
+	inv, err := LoadInventory(Settings{}, []string{"broken"}, "")
+	if err != nil {
+		t.Fatalf("LoadInventory: %v", err)
+	}
+	if len(inv.Backends()) != 0 {
+		t.Errorf("Backends = %v", inv.Backends())
+	}
+	if f := inv.Failures(); len(f) != 1 || f[0].Error() != "broken: boom" {
+		t.Errorf("Failures = %v", f)
 	}
 	if _, err := LoadInventory(Settings{}, nil, ""); err == nil {
 		t.Fatal("expected error with no backends")
+	}
+}
+
+// A configured executable that doesn't exist is reported by its .env key,
+// before the backend is even created.
+func TestInventory_ConfiguredPathMissing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	inv, err := LoadInventory(Settings{VmrunPath: missing, VBoxManagePath: missing}, []string{"workstation", "vbox"}, "")
+	if err != nil {
+		t.Fatalf("LoadInventory: %v", err)
+	}
+	f := inv.Failures()
+	if len(f) != 2 || !strings.HasPrefix(f[0].Error(), "VMware Workstation: VMRUN_PATH: ") ||
+		!strings.HasPrefix(f[1].Error(), "VirtualBox: VBOX_MANAGE_PATH: ") || !errors.Is(f[0].Err, fs.ErrNotExist) {
+		t.Errorf("Failures = %v", f)
+	}
+
+	inv, _ = LoadInventory(Settings{}, []string{"workstation"}, "")
+	if f := inv.Failures(); len(f) != 1 || !strings.Contains(f[0].Error(), "VMRUN_PATH is not set") {
+		t.Errorf("Failures = %v", f)
+	}
+}
+
+func TestNodeBackendsKeepsMissingPaths(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no VBoxManage on PATH
+	missing := filepath.Join(t.TempDir(), "missing")
+	s := Settings{Hypervisor: "workstation", VmrunPath: missing, VBoxManagePath: missing}
+	if got := NodeBackends(s, ""); !reflect.DeepEqual(got, []string{"workstation", "vbox"}) {
+		t.Errorf("NodeBackends = %v", got)
+	}
+	if got := NodeBackends(Settings{}, ""); len(got) != 0 {
+		t.Errorf("nothing configured: NodeBackends = %v", got)
+	}
+}
+
+func TestAutoDetectedBackend(t *testing.T) {
+	for _, c := range []struct {
+		s      Settings
+		hv     string
+		name   string
+		expect bool
+	}{
+		{Settings{}, "", "vbox", true},
+		{Settings{VBoxManagePath: "/x/VBoxManage"}, "", "vbox", false},
+		{Settings{Hypervisor: "vbox"}, "", "vbox", false},
+		{Settings{}, "vbox", "vbox", false},
+		{Settings{}, "", "workstation", false},
+	} {
+		if got := AutoDetectedBackend(c.s, c.hv, c.name); got != c.expect {
+			t.Errorf("AutoDetectedBackend(%+v, %q, %q) = %v", c.s, c.hv, c.name, got)
+		}
 	}
 }
 

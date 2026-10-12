@@ -111,6 +111,12 @@ Optional repository variables (*Settings -> Secrets and variables -> Actions -> 
 | `RIFT_ENV_PATH` | `C:/actions-runner/.env` | `.env` used by the pipeline |
 | `RIFT_COMMAND_TIMEOUT` | `180` | minutes before a node's command job is cancelled |
 
+### Runner service account
+
+The runner service must run as the Windows user that owns the VMs. `config.cmd --runasservice` defaults to NETWORK SERVICE, which can't read the user's VMware inventory or `~\.aws` credentials, can't see the user's VirtualBox VMs and can't manage Hyper-V. Register the runner with `--windowslogonaccount .\<user> --windowslogonpassword <password>`, or change it later in *services.msc -> actions.runner.\* -> Properties -> Log On* (which also grants "Log on as a service"), then restart the service.
+
+The runner also exports every line of its own `<runner dir>\.env` into every job (passwords included) and re-reads it only when the service restarts. rift copes with those raw copies, but keeping rift's settings outside the runner folder (set the `RIFT_ENV_PATH` repository variable, e.g. `C:/rift/rift.env`) avoids both.
+
 ## WSL/Windows Interoperability
 
 Rift supports both native Windows execution and WSL/Linux execution through a dual-binary approach:
@@ -138,7 +144,8 @@ VM_DIRECTORY=path/to/vms
 INVENTORY_PATH=path/to/inventory.vmls
 NETMAP_PATH=path/to/netmap.conf
 VDISK_PATH=path/to/vdiskmanager
-VM_ENCRYPTION_PASS=            # for encrypted VMs (or --vp)
+# for encrypted VMs (or --vp)
+VM_ENCRYPTION_PASS=
 
 # VirtualBox (VBoxManage is often not on PATH on Windows)
 VBOX_MANAGE_PATH=C:\Program Files\Oracle\VirtualBox\VBoxManage.exe
@@ -152,12 +159,16 @@ HYPERVISOR=workstation
 # Guest credentials for exec/bootstrap
 VM_DEFAULT_USER=runner
 VM_DEFAULT_PASS=your_password
-VM_SSH_PORT=22                 # Hyper-V Linux guests
-VM_SSH_KNOWN_HOSTS=            # default ~/.rift/known_hosts
+# Hyper-V Linux guests
+VM_SSH_PORT=22
+# default ~/.rift/known_hosts
+VM_SSH_KNOWN_HOSTS=
 
 # Node
-RIFT_NODE=omen                 # name shown in output/summaries (default: hostname)
-RIFT_MAX_PARALLEL=             # concurrent operations per hypervisor (default 8, Hyper-V 4)
+# name shown in output/summaries (default: hostname)
+RIFT_NODE=omen
+# concurrent operations per hypervisor (default 8, Hyper-V 4)
+RIFT_MAX_PARALLEL=
 
 ISO_DIRECTORY=path/to/isos
 ARCHIVE_PATH=path/to/archive
@@ -168,6 +179,8 @@ AWS_KEY_DIR=path/to/ssh/keys
 ```
 
 Every hypervisor that is configured (or, for VirtualBox, found on PATH) is used.
+
+**Quoting:** leave Windows paths unquoted or use single quotes - inside double quotes a backslash is an escape. Single-quote values that contain `$` (passwords): unquoted and double-quoted values expand `$NAME`, so `Summer$2024` would become `Summer`. Keep comments on their own lines.
 
 ### Building
 

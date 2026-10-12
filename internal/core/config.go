@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -56,17 +58,25 @@ type HostResources struct {
 	FreeDiskGB map[string]int // drive letter (Windows) or mount point (Linux) → free GB
 }
 
+// errNoHypervisor is LoadSettings' error for a .env that configures nothing.
+var errNoHypervisor = errors.New("no hypervisor configured in .env - set at least one of: VMRUN_PATH, VBOX_MANAGE_PATH, HYPERV_ENABLED, PROXMOX_HOST, or AWS_REGION")
+
+// SettingsErrorCode returns the error code for a LoadSettings error: a
+// missing setting when the .env configures nothing, otherwise a .env that
+// could not be read or parsed.
+func SettingsErrorCode(err error) string {
+	if errors.Is(err, errNoHypervisor) {
+		return ErrMissingSetting
+	}
+	return ErrEnvNotFound
+}
+
 func LoadSettings() (Settings, error) {
 	envFile := ".env"
 	if p := os.Getenv("ENV_PATH"); p != "" {
 		envFile = p
 	}
-	// Overload, not Load: values parsed from the file win over the
-	// environment. The GitHub Actions runner pre-loads <runner dir>\.env
-	// into every job's environment verbatim (no quote or comment handling),
-	// and Load never overrides an existing variable, so a quoted path or an
-	// inline "# comment" would otherwise reach rift corrupted.
-	if err := godotenv.Overload(envFile); err != nil {
+	if err := loadEnvFile(envFile); err != nil {
 		return Settings{}, fmt.Errorf("loading .env: %w", err)
 	}
 
@@ -116,7 +126,7 @@ func LoadSettings() (Settings, error) {
 	hasExplicit := s.Hypervisor != ""
 
 	if !hasVMware && !hasVBox && !hasHyperV && !hasProxmox && !hasAWS && !hasExplicit {
-		return Settings{}, fmt.Errorf("no hypervisor configured in .env - set at least one of: VMRUN_PATH, VBOX_MANAGE_PATH, HYPERV_ENABLED, PROXMOX_HOST, or AWS_REGION")
+		return Settings{}, errNoHypervisor
 	}
 
 	// Best-effort: initialize file logging if LOG_PATH is set.
@@ -125,6 +135,69 @@ func LoadSettings() (Settings, error) {
 	_ = InitLogging(s.LogPath)
 
 	return s, nil
+}
+
+// loadEnvFile sets the variables of the .env file at path, parsed by
+// godotenv. The GitHub Actions runner exports every line of <runner dir>\.env
+// into each job verbatim (no quote, comment or $ handling), and on the nodes
+// that file is rift's .env. godotenv.Load would keep those raw copies (a
+// quoted path keeps its quotes); godotenv.Overload would replace them but
+// also override variables set on purpose and expand '$' in an unquoted
+// password ("Summer$2024" -> "Summer"). So a variable already in the
+// environment is replaced only when it is the runner's raw copy of the line
+// and the raw text is visibly mangled by quotes, padding or a comment.
+func loadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	data = bytes.TrimPrefix(data, []byte("\uFEFF"))
+	parsed, err := godotenv.UnmarshalBytes(data)
+	if err != nil {
+		return err
+	}
+
+	// The runner's view of the file: key and value split at the first '=',
+	// neither trimmed, later lines win.
+	raw := map[string]string{}
+	commentOnly := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		i := strings.IndexByte(line, '=')
+		if i <= 0 {
+			continue
+		}
+		value := line[i+1:]
+		raw[line[:i]] = value
+		// godotenv reads "KEY=   # comment" as the value "# comment".
+		key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line[:i]), "export "))
+		padded := strings.HasPrefix(value, " ") || strings.HasPrefix(value, "\t")
+		commentOnly[key] = padded && strings.HasPrefix(strings.TrimSpace(value), "#")
+	}
+
+	for k, v := range parsed {
+		if commentOnly[k] {
+			v = ""
+		}
+		cur, set := os.LookupEnv(k)
+		if set {
+			r, fromRunner := raw[k]
+			if !fromRunner || cur != r || v == cur || !runnerMangled(cur) {
+				continue
+			}
+		}
+		if err := os.Setenv(k, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runnerMangled reports whether a raw .env value differs from what a .env
+// parser makes of it: padded, quoted, or followed by an inline comment.
+func runnerMangled(r string) bool {
+	return r != strings.TrimSpace(r) || strings.HasPrefix(r, `"`) || strings.HasPrefix(r, "'") ||
+		strings.Contains(r, " #") || strings.Contains(r, "\t#")
 }
 
 // Node returns the display name of this node: RIFT_NODE, else the hostname.
