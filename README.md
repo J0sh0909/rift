@@ -111,6 +111,18 @@ Optional repository variables (*Settings -> Secrets and variables -> Actions -> 
 | `RIFT_ENV_PATH` | `C:/actions-runner/.env` | `.env` used by the pipeline |
 | `RIFT_COMMAND_TIMEOUT` | `180` | minutes before a node's command job is cancelled |
 
+### Running rift by hand on a node
+
+The pipeline installs `rift.exe` into `RIFT_HOME` (`C:\actions-runner`) and calls it by full path. Typing `rift` in a terminal goes through PATH instead, so it can run an older copy installed somewhere else. Each deploy checks this and, where it's wrong, adds a warning and a section to the run summary. The runner service account can't change the machine PATH, so the fix is a one-time step in an elevated PowerShell on that node:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\actions-runner\rift-path.ps1               # check only
+powershell -ExecutionPolicy Bypass -File C:\actions-runner\rift-path.ps1 -Fix          # put C:\actions-runner first on the machine PATH
+powershell -ExecutionPolicy Bypass -File C:\actions-runner\rift-path.ps1 -Fix -RemoveStale  # and delete the other copies
+```
+
+Terminals that were already open keep their old PATH; open a new one.
+
 ## WSL/Windows Interoperability
 
 Rift supports both native Windows execution and WSL/Linux execution through a dual-binary approach:
