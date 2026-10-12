@@ -90,7 +90,11 @@ func loadSettings() core.Settings {
 			settings.EncryptionPass = vpFlag
 		}
 	})
-	exitOnErr(settingsErr)
+	if settingsErr != nil {
+		fail(core.ErrConfig, "%s", settingsErr)
+		noteServiceAccount()
+		exit(1)
+	}
 	return settings
 }
 

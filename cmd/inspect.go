@@ -107,7 +107,13 @@ var overviewCmd = &cobra.Command{
 	Short: "Show VMs across all detected hypervisors and AWS",
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		s, _ := core.LoadSettings() // best effort: AWS may work without .env
+		// AWS may work without .env, so a settings error is reported but
+		// doesn't stop the AWS section.
+		s, settingsErr := core.LoadSettings()
+		if settingsErr != nil {
+			fail(core.ErrConfig, "%s", settingsErr)
+			noteServiceAccount()
+		}
 
 		// AWS is a network call: run it alongside the local hypervisors.
 		var (
@@ -130,8 +136,18 @@ var overviewCmd = &cobra.Command{
 
 		var vms []core.Target
 		var backends []string
-		if inv, err := core.LoadInventory(s, core.NodeBackends(s, hvFlag), ""); err == nil {
-			vms, backends = inv.All(), inv.Backends()
+		if names := core.NodeBackends(s, hvFlag); settingsErr == nil && len(names) > 0 {
+			inv, err := core.LoadInventory(s, names, "")
+			if err != nil {
+				fail(core.ErrHypervisorInit, "%s", err)
+				noteServiceAccount()
+			} else {
+				vms, backends = inv.All(), inv.Backends()
+				for _, w := range inv.Warnings() {
+					fail(core.ErrHypervisorInit, "%s", w)
+				}
+				noteInventoryProblems(inv)
+			}
 		}
 		wg.Wait()
 
