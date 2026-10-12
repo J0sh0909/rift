@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"strings"
 	"sync"
 
@@ -27,11 +28,16 @@ func nodeInventory() *core.Inventory {
 		inv, err := core.LoadInventory(s, core.NodeBackends(s, hvFlag), preferred)
 		if err != nil {
 			fail(core.ErrHypervisorInit, "%s", err)
+			noteServiceAccount()
 			exit(1)
 		}
+		// A backend that can't be listed makes every result incomplete
+		// (e.g. "start -f DEV" would silently skip its DEV VMs), so it fails
+		// the run while the reachable backends are still acted on.
 		for _, w := range inv.Warnings() {
-			fmt.Fprintln(os.Stderr, w)
+			fail(core.ErrHypervisorInit, "%s", w)
 		}
+		noteInventoryProblems(inv)
 		if pipeline.enabled {
 			pipelineBackends(inv)
 		}
@@ -109,6 +115,51 @@ func quoteList(items []string) string {
 		q[i] = "'" + s + "'"
 	}
 	return strings.Join(q, ", ")
+}
+
+// Well-known SIDs of the low-privilege Windows service accounts. The GitHub
+// runner service runs as NETWORK SERVICE unless configured otherwise.
+var serviceAccountSIDs = map[string]bool{
+	"S-1-5-19": true, // LOCAL SERVICE
+	"S-1-5-20": true, // NETWORK SERVICE
+}
+
+var serviceNoteOnce sync.Once
+
+// noteServiceAccount explains, once per run, failures caused by running as a
+// low-privilege service account. Such an account can't read a user's profile
+// folders (paths under C:\Users\<name>), can't see the VirtualBox VMs a user
+// registered, and can't manage Hyper-V without Hyper-V Administrators
+// membership. No-op for any other account.
+func noteServiceAccount() {
+	u, err := user.Current()
+	if err != nil || !serviceAccountSIDs[u.Uid] {
+		return
+	}
+	serviceNoteOnce.Do(func() {
+		msg := fmt.Sprintf("rift is running as %s, the runner service's account. It cannot read folders in your user profile (C:\\Users\\...), "+
+			"cannot see VirtualBox VMs registered by your Windows user, and needs Hyper-V Administrators membership for Hyper-V. "+
+			"Run the runner service as the Windows user that owns the VMs: services.msc > actions.runner.* > Log On > This account.", u.Username)
+		fmt.Fprintln(os.Stderr, "note: "+msg)
+		pipelineNote("**note:** " + msg)
+	})
+}
+
+// noteInventoryProblems points at the service account when backends failed
+// or VirtualBox listed nothing (its VMs are registered per Windows user).
+func noteInventoryProblems(inv *core.Inventory) {
+	if len(inv.Warnings()) > 0 {
+		noteServiceAccount()
+		return
+	}
+	if _, ok := inv.Backend("vbox"); ok {
+		for _, t := range inv.All() {
+			if t.Backend == "vbox" {
+				return
+			}
+		}
+		noteServiceAccount()
+	}
 }
 
 // guestOSOf returns the guest OS identifier, asking the backend when the

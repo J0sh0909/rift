@@ -3,7 +3,6 @@ package core
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -62,7 +61,12 @@ func LoadSettings() (Settings, error) {
 	if p := os.Getenv("ENV_PATH"); p != "" {
 		envFile = p
 	}
-	if err := godotenv.Load(envFile); err != nil {
+	// Overload, not Load: values parsed from the file win over the
+	// environment. The GitHub Actions runner pre-loads <runner dir>\.env
+	// into every job's environment verbatim (no quote or comment handling),
+	// and Load never overrides an existing variable, so a quoted path or an
+	// inline "# comment" would otherwise reach rift corrupted.
+	if err := godotenv.Overload(envFile); err != nil {
 		return Settings{}, fmt.Errorf("loading .env: %w", err)
 	}
 
@@ -116,16 +120,9 @@ func LoadSettings() (Settings, error) {
 	}
 
 	// Best-effort: initialize file logging if LOG_PATH is set.
+	// Archive folders are created by "archive export" when needed, not
+	// here: a folder rift can't reach must not break unrelated commands.
 	_ = InitLogging(s.LogPath)
-
-	if s.ArchivePath != "" {
-		for _, sub := range []string{"OVF", "OVA"} {
-			dir := filepath.Join(s.ArchivePath, sub)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return Settings{}, fmt.Errorf("creating archive subdirectory %s: %w", dir, err)
-			}
-		}
-	}
 
 	return s, nil
 }

@@ -434,3 +434,59 @@ func TestE2ERestart(t *testing.T) {
 	running, _ := os.ReadFile(filepath.Join(l.state, "running"))
 	expect(t, "web-1 running again", string(running), "web-1.vmx")
 }
+
+// Regression: LoadSettings used to create ARCHIVE_PATH\OVF on every command
+// and fail when it couldn't (the runner's NETWORK SERVICE account can't read
+// C:\Users\<name>), which broke list/overview/start on the nodes.
+func TestE2EUnreachableArchivePathDoesNotBreakCommands(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	must(t, os.WriteFile(blocker, nil, 0o644))
+	l := newLab(t, "ARCHIVE_PATH="+filepath.Join(blocker, "vm-storage"))
+	out, errOut, code := l.rift(t, nil, "list")
+	if code != 0 {
+		t.Fatalf("list should not depend on ARCHIVE_PATH: exit %d\n%s%s", code, out, errOut)
+	}
+	expect(t, "list", out, "web-1 [ON]")
+}
+
+// Regression: overview printed "No VMs detected" and exited 0 when settings
+// or a backend failed. It must report the error and exit 1, and still show
+// the backends that worked.
+func TestE2EOverviewReportsErrors(t *testing.T) {
+	l := newLab(t)
+	must(t, os.WriteFile(filepath.Join(l.dir, "vmrun"), []byte("#!/bin/sh\necho 'Error: vmrun is broken' >&2\nexit 1\n"), 0o755))
+	out, errOut, code := l.rift(t, nil, "overview")
+	if code != 1 {
+		t.Errorf("a failing backend should make overview exit 1, got %d", code)
+	}
+	expect(t, "stderr", errOut, "skipping VMware Workstation", "vmrun is broken")
+	expect(t, "stdout", out, "VirtualBox", "vb-dev-7")
+
+	_, errOut, code = l.rift(t, []string{"ENV_PATH=" + filepath.Join(l.dir, "missing.env")}, "overview")
+	if code != 1 {
+		t.Errorf("a missing .env should make overview exit 1, got %d", code)
+	}
+	expect(t, "stderr", errOut, "loading .env")
+}
+
+// The GitHub runner pre-loads <runner dir>\.env verbatim, so a quoted value
+// arrives in the environment with its quotes. The parsed .env value must win.
+func TestE2ERunnerPreloadedEnvIsReparsed(t *testing.T) {
+	l := newLab(t)
+	vbox := filepath.Join(l.dir, "VBoxManage")
+	must(t, os.WriteFile(l.env, []byte(strings.Replace(mustRead(t, l.env),
+		"VBOX_MANAGE_PATH="+vbox, `VBOX_MANAGE_PATH="`+vbox+`"   # quoted, with a comment`, 1)), 0o644))
+	raw := `VBOX_MANAGE_PATH="` + vbox + `"   # quoted, with a comment`
+	out, errOut, code := l.rift(t, []string{raw}, "list")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out, errOut)
+	}
+	expect(t, "list", out, "VirtualBox", "vb-dev-7")
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	must(t, err)
+	return string(data)
+}
