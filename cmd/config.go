@@ -14,6 +14,7 @@ var (
 	coresFlag             int
 	socketsFlag           int
 	ramFlag               int
+	ramMBFlag             int
 	nicIndexFlag          int
 	nicTypeFlag           string
 	regenMacFlag          bool
@@ -86,26 +87,29 @@ var configCpuCmd = &cobra.Command{
 	},
 }
 
-// RAM: GB input, stored as MB in the VMX.
+// RAM: GB input (--size) or MB input (--mb), stored as MB in the VMX.
 var configRamCmd = &cobra.Command{
 	Use:   "ram [vm-names...]",
-	Short: "Change RAM size (in GB)",
+	Short: "Change RAM size (GB, or MB with --mb)",
 	Run: func(cmd *cobra.Command, args []string) {
-		if ramFlag == 0 {
-			fail(core.ErrRAMConfig, "--size is required")
+		if ramFlag == 0 && ramMBFlag == 0 {
+			fail(core.ErrRAMConfig, "--size (GB) or --mb is required")
 			return
 		}
+		memMB, label := ramMBFlag, fmt.Sprintf("%d MB", ramMBFlag)
+		if ramFlag != 0 {
+			memMB, label = core.GBtoMB(ramFlag), fmt.Sprintf("%d GB (%d MB)", ramFlag, core.GBtoMB(ramFlag))
+		}
 		host, _ := core.DetectHostResources()
-		if err := core.ValidateRAM(host, ramFlag); err != nil {
+		if err := core.ValidateRAM(host, memMB); err != nil {
 			fail(core.ErrRAMConfig, "%s", err)
 			return
 		}
-		memMB := core.GBtoMB(ramFlag)
 		configure("config ram", args, "ram", "change RAM", func(t core.Target) result {
 			if err := core.SetVMXKey(t.Path, "memsize", fmt.Sprintf("%d", memMB)); err != nil {
 				return failed(t, core.ErrRAMConfig, "%s", err)
 			}
-			return success(t, "RAM: %d GB (%d MB)", ramFlag, memMB)
+			return success(t, "RAM: %s", label)
 		})
 	},
 }
@@ -482,6 +486,8 @@ func init() {
 	configCpuCmd.Flags().IntVarP(&socketsFlag, "sockets", "S", 0, "Number of sockets")
 
 	configRamCmd.Flags().IntVarP(&ramFlag, "size", "m", 0, "RAM size in GB")
+	configRamCmd.Flags().IntVarP(&ramMBFlag, "mb", "M", 0, "RAM size in MB, a multiple of 4 (instead of --size)")
+	configRamCmd.MarkFlagsMutuallyExclusive("size", "mb")
 
 	configNicCmd.Flags().IntVarP(&nicIndexFlag, "index", "i", 0, "NIC index")
 	configNicCmd.Flags().StringVarP(&nicTypeFlag, "type", "t", "", "NIC type (bridged, nat, hostonly, custom)")

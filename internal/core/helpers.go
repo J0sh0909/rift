@@ -99,10 +99,14 @@ var RequiresPowerOff = map[string]bool{
 // Hardware Validation
 // ---------------------------------------------------------------------------
 
-// ValidateRAM checks that requested RAM doesn't exceed host capacity.
-func ValidateRAM(host HostResources, requestedGB int) error {
-	if host.TotalRAMGB > 0 && requestedGB > host.TotalRAMGB {
-		return fmt.Errorf("requested %d GB RAM exceeds host capacity of %d GB", requestedGB, host.TotalRAMGB)
+// ValidateRAM checks a requested RAM size in MB: positive, a multiple of 4
+// (VMware rejects any other memsize), and within host capacity.
+func ValidateRAM(host HostResources, requestedMB int) error {
+	if requestedMB <= 0 || requestedMB%4 != 0 {
+		return fmt.Errorf("RAM must be a positive multiple of 4 MB, got %d MB", requestedMB)
+	}
+	if host.TotalRAMGB > 0 && requestedMB > host.TotalRAMGB*1024 {
+		return fmt.Errorf("requested %d MB RAM exceeds host capacity of %d GB", requestedMB, host.TotalRAMGB)
 	}
 	return nil
 }
