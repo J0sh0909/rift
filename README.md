@@ -113,7 +113,7 @@ Optional repository variables (*Settings -> Secrets and variables -> Actions -> 
 
 ### Running rift by hand on a node
 
-The pipeline installs `rift.exe` into `RIFT_HOME` (`C:\actions-runner`) and calls it by full path. Typing `rift` in a terminal goes through PATH instead, so it can run an older copy installed somewhere else. Each deploy checks this and, where it's wrong, adds a warning and a section to the run summary. The runner service account can't change the machine PATH, so the fix is a one-time step in an elevated PowerShell on that node:
+The pipeline installs `rift.exe` into `RIFT_HOME` (`C:\actions-runner`) and calls it by full path. Typing `rift` in a terminal goes through PATH instead, so it can run an older copy installed somewhere else. Each deploy puts `RIFT_HOME` first on the machine PATH when it isn't. A runner service running as NETWORK SERVICE may not change the machine PATH; there the deploy adds a warning and a run-summary section instead, and the fix is a one-time step in an elevated PowerShell on that node:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\actions-runner\rift-path.ps1               # check only

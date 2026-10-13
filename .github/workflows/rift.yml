@@ -144,11 +144,12 @@ jobs:
           & (Join-Path $env:RIFT_HOME 'rift.exe') version
           exit $LASTEXITCODE
       # The pipeline calls rift by full path; a terminal goes through PATH and
-      # can run an older copy. The runner account can't change the machine
-      # PATH, so this only warns, with the one-time elevated fix.
-      - name: check PATH
+      # can run an older copy. Put RIFT_HOME first on the machine PATH where
+      # the runner account may write it; elsewhere (NETWORK SERVICE) warn
+      # with the one-time elevated fix.
+      - name: PATH
         shell: powershell
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $env:RIFT_HOME 'rift-path.ps1')
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $env:RIFT_HOME 'rift-path.ps1') -Auto
 
   command:
     if: github.event_name == 'workflow_dispatch'
