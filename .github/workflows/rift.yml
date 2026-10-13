@@ -1,6 +1,7 @@
 name: rift
 
-# push (main/dev)   -> build on "strong", install rift on every node
+# push (main/dev)   -> build on "strong", install rift on every node and
+#                      warn where a terminal's `rift` is not that copy
 # pull_request      -> verify on a GitHub-hosted runner (never on self-hosted
 #                      runners: this repo is public, so PRs from forks must
 #                      not run code on the lab machines)
@@ -108,6 +109,7 @@ jobs:
           path: |
             rift.exe
             rift-linux
+            scripts/rift-path.ps1
           if-no-files-found: error
           retention-days: 7
 
@@ -137,8 +139,17 @@ jobs:
             Copy-Item $f $target
             Remove-Item -Force -ErrorAction SilentlyContinue "$target.old"
           }
+          # Kept next to rift.exe so the PATH fix below can be run on the node.
+          Copy-Item -Force scripts\rift-path.ps1 (Join-Path $env:RIFT_HOME 'rift-path.ps1')
           & (Join-Path $env:RIFT_HOME 'rift.exe') version
           exit $LASTEXITCODE
+      # The pipeline calls rift by full path; a terminal goes through PATH and
+      # can run an older copy. Put RIFT_HOME first on the machine PATH where
+      # the runner account may write it; elsewhere (NETWORK SERVICE) warn
+      # with the one-time elevated fix.
+      - name: PATH
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $env:RIFT_HOME 'rift-path.ps1') -Auto
 
   command:
     if: github.event_name == 'workflow_dispatch'
